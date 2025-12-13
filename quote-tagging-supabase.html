@@ -1,0 +1,845 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quote Tagging System - Collaborative</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body class="bg-gradient-to-br from-purple-50 to-blue-50 min-h-screen">
+    <div id="app" class="p-6 max-w-6xl mx-auto"></div>
+
+    <script>
+        // ============= CONFIGURATION =============
+        // REPLACE THESE WITH YOUR SUPABASE CREDENTIALS
+        const SUPABASE_URL = 'YOUR_SUPABASE_URL';
+        const SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
+        
+        // Initialize Supabase client
+        const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+        // ============= STATE =============
+        let state = {
+            currentUser: null,
+            quotes: [],
+            currentIndex: 0,
+            currentTags: {
+                emotions: [],
+                lifeareas: [],
+                needs: [],
+                corequestions: []
+            },
+            view: 'login', // login, tagging, consensus, admin
+            allUsers: [],
+            consensusData: null,
+            selectedQuoteForConsensus: null,
+            isRendering: false
+        };
+
+        // ============= TAG SYSTEM =============
+        const tagSystem = {
+            emotions: {
+                question: "What emotional states does this quote address?",
+                tags: {
+                    Scared: "Fear, anxiety, worry, panic, terror",
+                    Sad: "Grief, heartbreak, depression, sorrow",
+                    Angry: "Frustration, resentment, irritation, rage",
+                    Lost: "Confused, directionless, uncertain",
+                    Alone: "Lonely, isolated, disconnected",
+                    Loving: "Feeling love, connected, warm",
+                    Happy: "Joyful, content, grateful, celebrating",
+                    Calm: "Peaceful, serene, tranquil, centered",
+                    Hopeful: "Optimistic, inspired, encouraged",
+                    Doubtful: "Uncertain, questioning, lacking confidence"
+                },
+                recommended: "2-3 tags"
+            },
+            lifeareas: {
+                question: "What situations or life areas does this quote apply to?",
+                tags: {
+                    Relationship: "Romantic partnerships, dating, marriage",
+                    Selfworth: "Self-esteem, identity, self-love",
+                    Purpose: "Life direction, meaning, calling",
+                    Spiritual: "Spiritual growth, enlightenment, awakening",
+                    Loss: "Death, endings, grief, letting go",
+                    NewBeginning: "Transitions, fresh starts, change",
+                    Work: "Career, service, contribution",
+                    Healing: "Recovery from pain, trauma, illness",
+                    Family: "Parents, children, siblings, community",
+                    InnerPeace: "Meditation, stillness, finding calm"
+                },
+                recommended: "2-4 tags"
+            },
+            needs: {
+                question: "What does someone NEED when they read this quote?",
+                tags: {
+                    Comfort: "Reassurance, 'it's going to be okay'",
+                    Motivation: "Encouragement to keep going",
+                    Wisdom: "Understanding, insight, deeper truth",
+                    Permission: "Validation, 'it's okay to feel this'",
+                    Direction: "Guidance on what to do",
+                    Perspective: "New way of seeing, reframe",
+                    Acceptance: "Surrender, letting go, 'stop fighting'",
+                    Strength: "Reminder of inner power, resilience"
+                },
+                recommended: "2-3 tags"
+            },
+            corequestions: {
+                question: "What deep existential question does this quote answer?",
+                tags: {
+                    "Am I enough?": "Worthiness, adequacy, self-value",
+                    "Will I be okay?": "Safety, survival, security, future",
+                    "Does anyone care?": "Love, belonging, being seen",
+                    "What's the point?": "Meaning, purpose, 'why am I here?'",
+                    "Am I doing it right?": "Validation, correctness, approval",
+                    "Why is this happening?": "Understanding suffering",
+                    "How do I let go?": "Release, surrender, detachment",
+                    "Who am I really?": "Identity, true self, authenticity"
+                },
+                recommended: "1-2 tags"
+            }
+        };
+
+        // ============= AUTH FUNCTIONS =============
+        async function login() {
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+
+            if (!username || !password) {
+                alert('Please enter username and password');
+                return;
+            }
+
+            const { data, error } = await supabase
+                .from('users')
+                .select('*')
+                .eq('username', username)
+                .eq('password', password)
+                .single();
+
+            if (error || !data) {
+                alert('Invalid credentials');
+                return;
+            }
+
+            state.currentUser = data;
+            await loadQuotes();
+            await loadUserProgress();
+            state.view = 'tagging';
+            render();
+        }
+
+        async function register() {
+            const username = document.getElementById('regUsername').value;
+            const password = document.getElementById('regPassword').value;
+
+            if (!username || !password) {
+                alert('Please enter username and password');
+                return;
+            }
+
+            if (password.length < 6) {
+                alert('Password must be at least 6 characters');
+                return;
+            }
+
+            const { data, error } = await supabase
+                .from('users')
+                .insert([{ username, password, role: 'tagger' }])
+                .select()
+                .single();
+
+            if (error) {
+                alert('Username already exists or registration failed');
+                return;
+            }
+
+            alert('Registration successful! Please login.');
+            render();
+        }
+
+        function logout() {
+            state.currentUser = null;
+            state.view = 'login';
+            state.quotes = [];
+            state.currentIndex = 0;
+            state.currentTags = { emotions: [], lifeareas: [], needs: [], corequestions: [] };
+            render();
+        }
+
+        // ============= DATA FUNCTIONS =============
+        async function loadQuotes() {
+            const { data, error } = await supabase
+                .from('quotes')
+                .select('*')
+                .order('created_at', { ascending: true });
+
+            if (error) {
+                console.error('Error loading quotes:', error);
+                return;
+            }
+
+            state.quotes = data || [];
+        }
+
+        async function loadUserProgress() {
+            if (!state.currentUser) return;
+
+            const { data, error } = await supabase
+                .from('user_tags')
+                .select('*')
+                .eq('user_id', state.currentUser.id);
+
+            if (error) {
+                console.error('Error loading progress:', error);
+                return;
+            }
+
+            // Find first untagged quote
+            const taggedQuoteIds = new Set(data.filter(t => t.completed).map(t => t.quote_id));
+            const firstUntagged = state.quotes.findIndex(q => !taggedQuoteIds.has(q.id));
+            
+            if (firstUntagged !== -1) {
+                state.currentIndex = firstUntagged;
+                await loadQuoteTags(state.quotes[firstUntagged].id);
+            } else if (state.quotes.length > 0) {
+                state.currentIndex = 0;
+                await loadQuoteTags(state.quotes[0].id);
+            }
+        }
+
+        async function loadQuoteTags(quoteId) {
+            if (!state.currentUser) return;
+
+            const { data, error } = await supabase
+                .from('user_tags')
+                .select('*')
+                .eq('quote_id', quoteId)
+                .eq('user_id', state.currentUser.id)
+                .maybeSingle();
+
+            if (data) {
+                state.currentTags = {
+                    emotions: data.emotions || [],
+                    lifeareas: data.lifeareas || [],
+                    needs: data.needs || [],
+                    corequestions: data.corequestions || []
+                };
+            } else {
+                state.currentTags = { emotions: [], lifeareas: [], needs: [], corequestions: [] };
+            }
+        }
+
+        async function saveCurrentQuote() {
+            const currentQuote = state.quotes[state.currentIndex];
+            if (!currentQuote || !state.currentUser) return;
+
+            const { error } = await supabase
+                .from('user_tags')
+                .upsert({
+                    quote_id: currentQuote.id,
+                    user_id: state.currentUser.id,
+                    emotions: state.currentTags.emotions,
+                    lifeareas: state.currentTags.lifeareas,
+                    needs: state.currentTags.needs,
+                    corequestions: state.currentTags.corequestions,
+                    completed: true,
+                    tagged_at: new Date().toISOString()
+                }, { onConflict: 'quote_id,user_id' });
+
+            if (error) {
+                console.error('Error saving tags:', error);
+                alert('Error saving tags. Please try again.');
+                return;
+            }
+
+            // Reset tags first
+            state.currentTags = { emotions: [], lifeareas: [], needs: [], corequestions: [] };
+
+            // Move to next quote
+            if (state.currentIndex < state.quotes.length - 1) {
+                state.currentIndex++;
+            } else {
+                state.currentIndex = 0;
+            }
+
+            await loadQuoteTags(state.quotes[state.currentIndex].id);
+            
+            render();
+        }
+
+        async function loadConsensusData() {
+            const { data: users } = await supabase.from('users').select('*');
+            state.allUsers = users || [];
+
+            // Load all tags for consensus calculation
+            const { data: allTags } = await supabase
+                .from('user_tags')
+                .select('*, quotes(*), users(username)')
+                .eq('completed', true);
+
+            state.consensusData = calculateConsensus(allTags || []);
+            render();
+        }
+
+        function calculateConsensus(allTags) {
+            const quoteMap = {};
+
+            allTags.forEach(tag => {
+                const quoteId = tag.quote_id;
+                if (!quoteMap[quoteId]) {
+                    quoteMap[quoteId] = {
+                        quote: tag.quotes,
+                        taggers: [],
+                        consensus: {
+                            emotions: {},
+                            lifeareas: {},
+                            needs: {},
+                            corequestions: {}
+                        }
+                    };
+                }
+
+                quoteMap[quoteId].taggers.push({
+                    username: tag.users.username,
+                    tags: {
+                        emotions: tag.emotions || [],
+                        lifeareas: tag.lifeareas || [],
+                        needs: tag.needs || [],
+                        corequestions: tag.corequestions || []
+                    }
+                });
+
+                // Count tags
+                ['emotions', 'lifeareas', 'needs', 'corequestions'].forEach(dim => {
+                    (tag[dim] || []).forEach(t => {
+                        if (!quoteMap[quoteId].consensus[dim][t]) {
+                            quoteMap[quoteId].consensus[dim][t] = 0;
+                        }
+                        quoteMap[quoteId].consensus[dim][t]++;
+                    });
+                });
+            });
+
+            return quoteMap;
+        }
+
+        function getConsensusStatus(count, totalTaggers) {
+            const percentage = (count / totalTaggers) * 100;
+            if (count >= 2) return { status: 'accepted', color: 'green', percentage };
+            if (count === 1) return { status: 'needs-review', color: 'orange', percentage };
+            return { status: 'rejected', color: 'red', percentage };
+        }
+
+        // ============= ADMIN FUNCTIONS =============
+        async function importQuotesCSV() {
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.accept = '.csv';
+            input.onchange = async (e) => {
+                const file = e.target.files[0];
+                const reader = new FileReader();
+                reader.onload = async (event) => {
+                    const text = event.target.result;
+                    const lines = text.split('\n');
+                    const quotesToInsert = [];
+                    
+                    for (let i = 1; i < lines.length; i++) {
+                        const line = lines[i].trim();
+                        if (!line) continue;
+                        
+                        const matches = line.match(/(?:^|,)("(?:[^"]|"")*"|[^,]*)/g);
+                        if (!matches || matches.length < 3) continue;
+                        
+                        const clean = matches.map(m => m.replace(/^,?"?|"?$/g, '').replace(/""/g, '"'));
+                        
+                        quotesToInsert.push({
+                            quote: clean[0],
+                            author: clean[1] || 'Unknown',
+                            source: clean[2] || ''
+                        });
+                    }
+                    
+                    const { error } = await supabase
+                        .from('quotes')
+                        .insert(quotesToInsert);
+
+                    if (error) {
+                        alert('Error importing quotes: ' + error.message);
+                    } else {
+                        alert(`Successfully imported ${quotesToInsert.length} quotes!`);
+                        await loadQuotes();
+                        render();
+                    }
+                };
+                reader.readAsText(file);
+            };
+            input.click();
+        }
+
+        async function exportConsensusCSV() {
+            if (!state.consensusData) {
+                await loadConsensusData();
+            }
+
+            let csv = 'quote,author,source,emotions,lifeareas,needs,corequestions,taggers_count,conflicts\n';
+            
+            Object.values(state.consensusData).forEach(item => {
+                const quote = item.quote;
+                const taggerCount = item.taggers.length;
+                
+                // Get consensus tags (2+ votes)
+                const getConsensusTags = (dim) => {
+                    return Object.entries(item.consensus[dim])
+                        .filter(([tag, count]) => count >= 2)
+                        .map(([tag]) => tag)
+                        .join(';');
+                };
+
+                const hasConflicts = Object.values(item.consensus).some(dim => 
+                    Object.values(dim).some(count => count === 1)
+                );
+
+                csv += `"${quote.quote.replace(/"/g, '""')}","${quote.author}","${quote.source || ''}",`;
+                csv += `"${getConsensusTags('emotions')}","${getConsensusTags('lifeareas')}",`;
+                csv += `"${getConsensusTags('needs')}","${getConsensusTags('corequestions')}",`;
+                csv += `${taggerCount},${hasConflicts ? 'YES' : 'NO'}\n`;
+            });
+            
+            const blob = new Blob([csv], { type: 'text/csv' });
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'consensus_tags.csv';
+            a.click();
+        }
+
+        // ============= UI FUNCTIONS =============
+        function toggleTag(dimension, tag) {
+            const current = state.currentTags[dimension];
+            if (current.includes(tag)) {
+                state.currentTags[dimension] = current.filter(t => t !== tag);
+            } else {
+                state.currentTags[dimension] = [...current, tag];
+            }
+            render();
+        }
+
+        async function loadQuote(index) {
+            state.currentIndex = index;
+            await loadQuoteTags(state.quotes[index].id);
+            render();
+        }
+
+        function setView(view) {
+            state.view = view;
+            if (view === 'consensus') {
+                loadConsensusData();
+            }
+            render();
+        }
+
+        // ============= RENDER FUNCTIONS =============
+        function render() {
+            // Prevent multiple simultaneous renders
+            if (state.isRendering) return;
+            state.isRendering = true;
+
+            const app = document.getElementById('app');
+            if (!app) {
+                state.isRendering = false;
+                return;
+            }
+
+            if (!state.currentUser) {
+                app.innerHTML = renderLogin();
+            } else if (state.view === 'tagging') {
+                app.innerHTML = renderTagging();
+            } else if (state.view === 'consensus') {
+                app.innerHTML = renderConsensus();
+            } else if (state.view === 'admin') {
+                app.innerHTML = renderAdmin();
+            }
+
+            state.isRendering = false;
+        }
+
+        function renderLogin() {
+            return `
+                <div class="min-h-screen flex items-center justify-center">
+                    <div class="bg-white rounded-lg shadow-2xl p-8 max-w-md w-full">
+                        <h1 class="text-3xl font-bold text-gray-800 mb-6 text-center">Quote Tagging System</h1>
+                        <p class="text-gray-600 mb-6 text-center">Collaborative 4D Emotional Matching</p>
+                        
+                        <div class="space-y-6">
+                            <div>
+                                <h2 class="text-xl font-semibold mb-4">Login</h2>
+                                <div class="space-y-3">
+                                    <input type="text" id="username" placeholder="Username" 
+                                        class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500">
+                                    <input type="password" id="password" placeholder="Password" 
+                                        class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500">
+                                    <button onclick="login()" 
+                                        class="w-full px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 font-semibold">
+                                        Login
+                                    </button>
+                                </div>
+                            </div>
+                            
+                            <div class="border-t pt-6">
+                                <h2 class="text-xl font-semibold mb-4">Register</h2>
+                                <div class="space-y-3">
+                                    <input type="text" id="regUsername" placeholder="Username" 
+                                        class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500">
+                                    <input type="password" id="regPassword" placeholder="Password (min 6 chars)" 
+                                        class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500">
+                                    <button onclick="register()" 
+                                        class="w-full px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 font-semibold">
+                                        Register
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="mt-6 p-4 bg-blue-50 rounded-lg text-sm">
+                            <p class="font-semibold text-blue-900 mb-2">Default Admin Account:</p>
+                            <p class="text-blue-800">Username: admin</p>
+                            <p class="text-blue-800">Password: admin123</p>
+                            <p class="text-xs text-blue-600 mt-2">⚠️ Change password after first login!</p>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderTagging() {
+            const currentQuote = state.quotes[state.currentIndex];
+            const taggedByUser = state.quotes.filter((q, idx) => {
+                // This is a simple count - in real app would check user_tags table
+                return idx <= state.currentIndex;
+            }).length;
+
+            const progress = {
+                total: state.quotes.length,
+                tagged: taggedByUser,
+                percentage: state.quotes.length > 0 ? Math.round((taggedByUser / state.quotes.length) * 100) : 0
+            };
+
+            return `
+                <div class="bg-white rounded-lg shadow-lg p-6 mb-6">
+                    <div class="flex justify-between items-center mb-4 flex-wrap gap-4">
+                        <div>
+                            <h1 class="text-3xl font-bold text-gray-800 mb-2">Quote Tagging System</h1>
+                            <p class="text-gray-600">Welcome, ${state.currentUser.username}! 
+                                ${state.currentUser.role === 'admin' ? '(Admin)' : '(Tagger)'}</p>
+                        </div>
+                        <div class="flex gap-3 flex-wrap">
+                            ${state.currentUser.role === 'admin' ? `
+                                <button onclick="setView('admin')" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
+                                    ⚙️ Admin
+                                </button>
+                                <button onclick="setView('consensus')" class="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700">
+                                    📊 Consensus
+                                </button>
+                            ` : ''}
+                            <button onclick="logout()" class="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700">
+                                Logout
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="space-y-2">
+                        <div class="flex justify-between text-sm">
+                            <span class="text-gray-600">Your Progress: ${progress.tagged} / ${progress.total} quotes</span>
+                            <span class="font-semibold text-purple-600">${progress.percentage}%</span>
+                        </div>
+                        <div class="w-full bg-gray-200 rounded-full h-3">
+                            <div class="bg-gradient-to-r from-purple-500 to-blue-500 h-3 rounded-full transition-all" 
+                                style="width: ${progress.percentage}%"></div>
+                        </div>
+                    </div>
+                </div>
+
+                ${state.quotes.length === 0 ? `
+                    <div class="bg-white rounded-lg shadow-lg p-12 text-center">
+                        <div class="text-6xl mb-4">🏷️</div>
+                        <h2 class="text-2xl font-semibold text-gray-800 mb-2">No Quotes Available</h2>
+                        <p class="text-gray-600 mb-6">Please contact admin to import quotes</p>
+                    </div>
+                ` : `
+                    ${renderQuoteNavigation(currentQuote)}
+                    ${currentQuote ? renderTaggingInterface(currentQuote) : ''}
+                `}
+            `;
+        }
+
+        function renderQuoteNavigation(currentQuote) {
+            return `
+                <div class="bg-white rounded-lg shadow-lg p-6 mb-6">
+                    <div class="flex items-center justify-between mb-4">
+                        <button onclick="loadQuote(${Math.max(0, state.currentIndex - 1)})" 
+                            ${state.currentIndex === 0 ? 'disabled' : ''} 
+                            class="px-4 py-2 bg-gray-200 rounded-lg hover:bg-gray-300 disabled:opacity-50">
+                            ← Previous
+                        </button>
+                        <div class="text-center">
+                            <span class="text-sm text-gray-600">Quote</span>
+                            <div class="text-2xl font-bold text-gray-800">
+                                ${state.currentIndex + 1} / ${state.quotes.length}
+                            </div>
+                        </div>
+                        <button onclick="loadQuote(${Math.min(state.quotes.length - 1, state.currentIndex + 1)})" 
+                            ${state.currentIndex === state.quotes.length - 1 ? 'disabled' : ''} 
+                            class="px-4 py-2 bg-gray-200 rounded-lg hover:bg-gray-300 disabled:opacity-50">
+                            Next →
+                        </button>
+                    </div>
+
+                    ${currentQuote ? `
+                        <div class="bg-gradient-to-r from-purple-100 to-blue-100 rounded-lg p-6">
+                            <p class="text-xl text-gray-800 mb-3 italic">"${currentQuote.quote}"</p>
+                            <p class="text-gray-700 font-semibold">— ${currentQuote.author}</p>
+                            ${currentQuote.source ? `<p class="text-gray-600 text-sm mt-1">${currentQuote.source}</p>` : ''}
+                        </div>
+                    ` : ''}
+                </div>
+            `;
+        }
+
+        function renderTaggingInterface(currentQuote) {
+            let html = '<div class="space-y-6">';
+            
+            Object.entries(tagSystem).forEach(([dimension, data]) => {
+                html += `
+                    <div class="bg-white rounded-lg shadow-lg p-6">
+                        <div class="bg-gradient-to-r from-purple-100 to-blue-100 rounded-lg p-4 mb-4">
+                            <p class="text-lg text-gray-800 italic">"${currentQuote.quote}"</p>
+                            <p class="text-gray-700 font-semibold mt-2">— ${currentQuote.author}</p>
+                        </div>
+                        
+                        <div class="mb-4">
+                            <h3 class="text-xl font-bold text-gray-800 mb-1 capitalize">
+                                ${dimension.replace('corequestions', 'Core Questions')}
+                            </h3>
+                            <p class="text-gray-600 mb-1">${data.question}</p>
+                            <p class="text-sm text-purple-600 font-semibold">Recommended: ${data.recommended}</p>
+                            <p class="text-sm text-gray-500 mt-1">
+                                Selected: ${state.currentTags[dimension].length}
+                            </p>
+                        </div>
+                        
+                        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                `;
+                
+                Object.entries(data.tags).forEach(([tag, description]) => {
+                    const isSelected = state.currentTags[dimension].includes(tag);
+                    html += `
+                        <button onclick="toggleTag('${dimension}', '${tag.replace(/'/g, "\\\'")}')" 
+                            class="p-4 rounded-lg border-2 text-left transition-all ${isSelected ? 'border-purple-500 bg-purple-50 shadow-md' : 'border-gray-200 hover:border-purple-300 hover:bg-gray-50'}">
+                            <div class="flex items-start justify-between mb-2">
+                                <span class="font-semibold text-gray-800">${tag}</span>
+                                ${isSelected ? '<span class="text-purple-600 text-xl">✓</span>' : ''}
+                            </div>
+                            <p class="text-sm text-gray-600">${description}</p>
+                        </button>
+                    `;
+                });
+                
+                html += `
+                        </div>
+                    </div>
+                `;
+            });
+            
+            html += `
+                <div class="bg-white rounded-lg shadow-lg p-6">
+                    <div class="flex items-center justify-between flex-wrap gap-4">
+                        <div>
+                            <h3 class="text-lg font-semibold text-gray-800 mb-1">Ready to Save?</h3>
+                            <p class="text-sm text-gray-600">Your tags will be saved for consensus calculation</p>
+                        </div>
+                        <button onclick="saveCurrentQuote()" 
+                            class="px-8 py-3 bg-gradient-to-r from-purple-600 to-blue-600 text-white rounded-lg hover:from-purple-700 hover:to-blue-700 font-semibold text-lg shadow-lg">
+                            Save & Next
+                        </button>
+                    </div>
+                </div>
+            </div>`;
+            
+            return html;
+        }
+
+        function renderConsensus() {
+            if (!state.consensusData) {
+                return `
+                    <div class="bg-white rounded-lg shadow-lg p-12 text-center">
+                        <div class="text-6xl mb-4">⏳</div>
+                        <p class="text-gray-600">Loading consensus data...</p>
+                    </div>
+                `;
+            }
+
+            const quotes = Object.entries(state.consensusData);
+            const totalQuotes = quotes.length;
+            const quotesWithConflicts = quotes.filter(([id, data]) => {
+                return Object.values(data.consensus).some(dim => 
+                    Object.values(dim).some(count => count === 1)
+                );
+            }).length;
+
+            return `
+                <div class="bg-white rounded-lg shadow-lg p-6 mb-6">
+                    <div class="flex justify-between items-center mb-4">
+                        <h1 class="text-3xl font-bold text-gray-800">Consensus Dashboard</h1>
+                        <div class="flex gap-3">
+                            <button onclick="exportConsensusCSV()" 
+                                class="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700">
+                                ⬇️ Export Consensus
+                            </button>
+                            <button onclick="setView('tagging')" 
+                                class="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700">
+                                Back to Tagging
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
+                        <div class="bg-blue-50 rounded-lg p-6 text-center">
+                            <div class="text-4xl font-bold text-blue-600 mb-2">${totalQuotes}</div>
+                            <div class="text-gray-600">Quotes Tagged</div>
+                        </div>
+                        <div class="bg-green-50 rounded-lg p-6 text-center">
+                            <div class="text-4xl font-bold text-green-600 mb-2">${totalQuotes - quotesWithConflicts}</div>
+                            <div class="text-gray-600">Full Consensus</div>
+                        </div>
+                        <div class="bg-orange-50 rounded-lg p-6 text-center">
+                            <div class="text-4xl font-bold text-orange-600 mb-2">${quotesWithConflicts}</div>
+                            <div class="text-gray-600">Need Review</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="space-y-4">
+                    ${quotes.map(([quoteId, data]) => renderConsensusQuote(quoteId, data)).join('')}
+                </div>
+            `;
+        }
+
+        function renderConsensusQuote(quoteId, data) {
+            const taggerCount = data.taggers.length;
+            const hasConflicts = Object.values(data.consensus).some(dim => 
+                Object.values(dim).some(count => count === 1 && taggerCount >= 2)
+            );
+
+            return `
+                <div class="bg-white rounded-lg shadow-lg p-6">
+                    <div class="mb-4">
+                        <div class="flex justify-between items-start mb-3">
+                            <div class="flex-1">
+                                <p class="text-lg text-gray-800 italic mb-2">"${data.quote.quote}"</p>
+                                <p class="text-gray-700 font-semibold">— ${data.quote.author}</p>
+                            </div>
+                            <div class="ml-4">
+                                ${hasConflicts ? 
+                                    '<span class="bg-orange-100 text-orange-800 px-3 py-1 rounded-full text-sm">⚠️ Conflicts</span>' :
+                                    '<span class="bg-green-100 text-green-800 px-3 py-1 rounded-full text-sm">✓ Consensus</span>'
+                                }
+                            </div>
+                        </div>
+                        <p class="text-sm text-gray-600">Tagged by: ${data.taggers.map(t => t.username).join(', ')} (${taggerCount} users)</p>
+                    </div>
+
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        ${Object.entries(tagSystem).map(([dimension, dimData]) => `
+                            <div class="border border-gray-200 rounded-lg p-4">
+                                <h4 class="font-semibold text-gray-800 mb-2 capitalize">
+                                    ${dimension.replace('corequestions', 'Core Questions')}
+                                </h4>
+                                <div class="space-y-2">
+                                    ${Object.entries(data.consensus[dimension] || {})
+                                        .sort((a, b) => b[1] - a[1])
+                                        .map(([tag, count]) => {
+                                            const status = getConsensusStatus(count, taggerCount);
+                                            return `
+                                                <div class="flex justify-between items-center">
+                                                    <span class="text-sm text-gray-700">${tag}</span>
+                                                    <span class="text-xs px-2 py-1 rounded ${
+                                                        status.status === 'accepted' ? 'bg-green-100 text-green-800' :
+                                                        status.status === 'needs-review' ? 'bg-orange-100 text-orange-800' :
+                                                        'bg-red-100 text-red-800'
+                                                    }">
+                                                        ${count}/${taggerCount} (${Math.round(status.percentage)}%)
+                                                    </span>
+                                                </div>
+                                            `;
+                                        }).join('')
+                                    }
+                                </div>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderAdmin() {
+            return `
+                <div class="bg-white rounded-lg shadow-lg p-6">
+                    <div class="flex justify-between items-center mb-6">
+                        <h1 class="text-3xl font-bold text-gray-800">Admin Panel</h1>
+                        <button onclick="setView('tagging')" 
+                            class="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700">
+                            Back to Tagging
+                        </button>
+                    </div>
+
+                    <div class="space-y-6">
+                        <div class="bg-blue-50 rounded-lg p-6">
+                            <h3 class="text-lg font-semibold text-gray-800 mb-4">Import Quotes</h3>
+                            <p class="text-gray-600 mb-4">Upload a CSV file with columns: quote, author, source</p>
+                            <button onclick="importQuotesCSV()" 
+                                class="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-semibold">
+                                📁 Import CSV File
+                            </button>
+                        </div>
+
+                        <div class="bg-green-50 rounded-lg p-6">
+                            <h3 class="text-lg font-semibold text-gray-800 mb-4">Statistics</h3>
+                            <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                                <div class="bg-white rounded-lg p-4 text-center">
+                                    <div class="text-2xl font-bold text-gray-800">${state.quotes.length}</div>
+                                    <div class="text-sm text-gray-600">Total Quotes</div>
+                                </div>
+                                <div class="bg-white rounded-lg p-4 text-center">
+                                    <div class="text-2xl font-bold text-gray-800">${state.allUsers.length}</div>
+                                    <div class="text-sm text-gray-600">Total Users</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="bg-purple-50 rounded-lg p-6">
+                            <h3 class="text-lg font-semibold text-gray-800 mb-4">Users</h3>
+                            <div class="space-y-2">
+                                ${state.allUsers.map(user => `
+                                    <div class="bg-white rounded-lg p-3 flex justify-between items-center">
+                                        <div>
+                                            <span class="font-semibold">${user.username}</span>
+                                            <span class="text-sm text-gray-600 ml-2">(${user.role})</span>
+                                        </div>
+                                    </div>
+                                `).join('')}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        // Initialize
+        window.addEventListener('DOMContentLoaded', function() {
+            render();
+        });
+    </script>
+</body>
+</html>
