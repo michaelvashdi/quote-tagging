@@ -1,8 +1,8 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Quote Tagging System - Collaborative</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
@@ -12,12 +12,20 @@
 
     <script>
         // ============= CONFIGURATION =============
-        // REPLACE THESE WITH YOUR SUPABASE CREDENTIALS
+        // Replace the placeholder below with your actual project values.
+        // IMPORTANT: never commit service_role keys; only use anon/public keys in client code.
         const SUPABASE_URL = 'https://kdkhucclzohjospjpbvd.supabase.co';
-        const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imtka2h1Y2Nsem9oam9zcGpwYnZkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjU2MDAxNzYsImV4cCI6MjA4MTE3NjE3Nn0.hXVsAwTUJlDYYzo4HvUJAxUCJGHVOgF0H9fOwC9_13g';
-        
-        // Initialize Supabase client
-        const supabase = window.supabase.createClient(https://kdkhucclzohjospjpbvd.supabase.co, eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imtka2h1Y2Nsem9oam9zcGpwYnZkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjU2MDAxNzYsImV4cCI6MjA4MTE3NjE3Nn0.hXVsAwTUJlDYYzo4HvUJAxUCJGHVOgF0H9fOwC9_13g);
+        const SUPABASE_ANON_KEY = 'REPLACE_WITH_ANON_KEY';
+
+        // Initialize Supabase client safely (supabase-js v2 via CDN exposes window.supabase)
+        const _createClient = window.supabase?.createClient;
+        const supabase = typeof _createClient === 'function'
+            ? _createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+            : null;
+
+        if (!supabase) {
+            console.warn('Supabase client not initialized. Check that @supabase/supabase-js loaded correctly.');
+        }
 
         // ============= STATE =============
         let state = {
@@ -103,36 +111,70 @@
 
         // ============= AUTH FUNCTIONS =============
         async function login() {
-            const username = document.getElementById('username').value;
-            const password = document.getElementById('password').value;
+            if (!supabase) { alert('Supabase not initialized'); return; }
+
+            const usernameEl = document.getElementById('username');
+            const passwordEl = document.getElementById('password');
+            const username = usernameEl ? usernameEl.value.trim() : '';
+            const password = passwordEl ? passwordEl.value : '';
 
             if (!username || !password) {
                 alert('Please enter username and password');
                 return;
             }
 
-            const { data, error } = await supabase
-                .from('users')
-                .select('*')
-                .eq('username', username)
-                .eq('password', password)
-                .single();
+            try {
+                const { data, error } = await supabase.auth.signInWithPassword({
+                    email: username,
+                    password
+                });
 
-            if (error || !data) {
-                alert('Invalid credentials');
-                return;
+                if (error && !data) {
+                    console.warn('Auth sign in failed:', error.message);
+                }
+
+                const user = data?.user;
+                if (user) {
+                    const { data: appUser } = await supabase
+                        .from('users')
+                        .select('*')
+                        .eq('id', user.id)
+                        .maybeSingle();
+
+                    state.currentUser = appUser || { username, id: user.id, role: 'tagger' };
+                } else {
+                    // Fallback to legacy users table (plaintext) - not recommended
+                    const { data: row, error: rowErr } = await supabase
+                        .from('users')
+                        .select('*')
+                        .eq('username', username)
+                        .eq('password', password)
+                        .maybeSingle();
+
+                    if (rowErr || !row) {
+                        alert('Invalid credentials');
+                        return;
+                    }
+                    state.currentUser = row;
+                }
+
+                await loadQuotes();
+                await loadUserProgress();
+                state.view = 'tagging';
+                render();
+            } catch (err) {
+                console.error('Login error', err);
+                alert('Login failed. See console for details.');
             }
-
-            state.currentUser = data;
-            await loadQuotes();
-            await loadUserProgress();
-            state.view = 'tagging';
-            render();
         }
 
         async function register() {
-            const username = document.getElementById('regUsername').value;
-            const password = document.getElementById('regPassword').value;
+            if (!supabase) { alert('Supabase not initialized'); return; }
+
+            const usernameEl = document.getElementById('regUsername');
+            const passwordEl = document.getElementById('regPassword');
+            const username = usernameEl ? usernameEl.value.trim() : '';
+            const password = passwordEl ? passwordEl.value : '';
 
             if (!username || !password) {
                 alert('Please enter username and password');
@@ -144,19 +186,34 @@
                 return;
             }
 
-            const { data, error } = await supabase
-                .from('users')
-                .insert([{ username, password, role: 'tagger' }])
-                .select()
-                .single();
+            try {
+                const { data, error } = await supabase.auth.signUp({
+                    email: username,
+                    password
+                }, { data: { username } });
 
-            if (error) {
-                alert('Username already exists or registration failed');
-                return;
+                if (error) {
+                    console.error('Auth signUp error', error);
+                    alert('Registration failed: ' + error.message);
+                    return;
+                }
+
+                if (data?.user?.id) {
+                    const { error: insertErr } = await supabase
+                        .from('users')
+                        .insert([{ id: data.user.id, username, role: 'tagger' }]);
+
+                    if (insertErr) {
+                        console.warn('Could not create users row:', insertErr.message);
+                    }
+                }
+
+                alert('Registration successful! Please check email to confirm and then login.');
+                render();
+            } catch (err) {
+                console.error('Register error', err);
+                alert('Registration failed. See console for details.');
             }
-
-            alert('Registration successful! Please login.');
-            render();
         }
 
         function logout() {
@@ -170,21 +227,26 @@
 
         // ============= DATA FUNCTIONS =============
         async function loadQuotes() {
-            const { data, error } = await supabase
-                .from('quotes')
-                .select('*')
-                .order('created_at', { ascending: true });
+            if (!supabase) return;
+            try {
+                const { data, error } = await supabase
+                    .from('quotes')
+                    .select('*')
+                    .order('created_at', { ascending: true });
 
-            if (error) {
-                console.error('Error loading quotes:', error);
-                return;
+                if (error) {
+                    console.error('Error loading quotes:', error);
+                    return;
+                }
+
+                state.quotes = Array.isArray(data) ? data : [];
+            } catch (err) {
+                console.error('loadQuotes error', err);
             }
-
-            state.quotes = data || [];
         }
 
         async function loadUserProgress() {
-            if (!state.currentUser) return;
+            if (!state.currentUser || !supabase) return;
 
             const { data, error } = await supabase
                 .from('user_tags')
@@ -196,21 +258,20 @@
                 return;
             }
 
-            // Find first untagged quote
-            const taggedQuoteIds = new Set(data.filter(t => t.completed).map(t => t.quote_id));
-            const firstUntagged = state.quotes.findIndex(q => !taggedQuoteIds.has(q.id));
-            
+            const taggedQuoteIds = new Set((data || []).filter(t => t.completed).map(t => t.quote_id));
+            const firstUntagged = (state.quotes || []).findIndex(q => !taggedQuoteIds.has(q.id));
+
             if (firstUntagged !== -1) {
                 state.currentIndex = firstUntagged;
                 await loadQuoteTags(state.quotes[firstUntagged].id);
-            } else if (state.quotes.length > 0) {
+            } else if ((state.quotes || []).length > 0) {
                 state.currentIndex = 0;
                 await loadQuoteTags(state.quotes[0].id);
             }
         }
 
         async function loadQuoteTags(quoteId) {
-            if (!state.currentUser) return;
+            if (!state.currentUser || !supabase || !quoteId) return;
 
             const { data, error } = await supabase
                 .from('user_tags')
@@ -219,12 +280,17 @@
                 .eq('user_id', state.currentUser.id)
                 .maybeSingle();
 
+            if (error) {
+                console.error('Error loading quote tags:', error);
+                return;
+            }
+
             if (data) {
                 state.currentTags = {
-                    emotions: data.emotions || [],
-                    lifeareas: data.lifeareas || [],
-                    needs: data.needs || [],
-                    corequestions: data.corequestions || []
+                    emotions: Array.isArray(data.emotions) ? data.emotions : [],
+                    lifeareas: Array.isArray(data.lifeareas) ? data.lifeareas : [],
+                    needs: Array.isArray(data.needs) ? data.needs : [],
+                    corequestions: Array.isArray(data.corequestions) ? data.corequestions : []
                 };
             } else {
                 state.currentTags = { emotions: [], lifeareas: [], needs: [], corequestions: [] };
@@ -232,7 +298,8 @@
         }
 
         async function saveCurrentQuote() {
-            const currentQuote = state.quotes[state.currentIndex];
+            if (!supabase) return;
+            const currentQuote = (state.quotes || [])[state.currentIndex];
             if (!currentQuote || !state.currentUser) return;
 
             const { error } = await supabase
@@ -254,43 +321,41 @@
                 return;
             }
 
-            // Reset tags first
             state.currentTags = { emotions: [], lifeareas: [], needs: [], corequestions: [] };
 
-            // Move to next quote
-            if (state.currentIndex < state.quotes.length - 1) {
+            if (state.currentIndex < (state.quotes || []).length - 1) {
                 state.currentIndex++;
             } else {
                 state.currentIndex = 0;
             }
 
-            await loadQuoteTags(state.quotes[state.currentIndex].id);
-            
+            await loadQuoteTags((state.quotes || [])[state.currentIndex]?.id);
             render();
         }
 
         async function loadConsensusData() {
+            if (!supabase) return;
             const { data: users } = await supabase.from('users').select('*');
-            state.allUsers = users || [];
+            state.allUsers = Array.isArray(users) ? users : [];
 
-            // Load all tags for consensus calculation
             const { data: allTags } = await supabase
                 .from('user_tags')
                 .select('*, quotes(*), users(username)')
                 .eq('completed', true);
 
-            state.consensusData = calculateConsensus(allTags || []);
+            state.consensusData = calculateConsensus(Array.isArray(allTags) ? allTags : []);
             render();
         }
 
         function calculateConsensus(allTags) {
             const quoteMap = {};
 
-            allTags.forEach(tag => {
+            (allTags || []).forEach(tag => {
                 const quoteId = tag.quote_id;
+                if (!quoteId) return;
                 if (!quoteMap[quoteId]) {
                     quoteMap[quoteId] = {
-                        quote: tag.quotes,
+                        quote: tag.quotes || {},
                         taggers: [],
                         consensus: {
                             emotions: {},
@@ -302,18 +367,17 @@
                 }
 
                 quoteMap[quoteId].taggers.push({
-                    username: tag.users.username,
+                    username: tag.users?.username || 'unknown',
                     tags: {
-                        emotions: tag.emotions || [],
-                        lifeareas: tag.lifeareas || [],
-                        needs: tag.needs || [],
-                        corequestions: tag.corequestions || []
+                        emotions: Array.isArray(tag.emotions) ? tag.emotions : [],
+                        lifeareas: Array.isArray(tag.lifeareas) ? tag.lifeareas : [],
+                        needs: Array.isArray(tag.needs) ? tag.needs : [],
+                        corequestions: Array.isArray(tag.corequestions) ? tag.corequestions : []
                     }
                 });
 
-                // Count tags
                 ['emotions', 'lifeareas', 'needs', 'corequestions'].forEach(dim => {
-                    (tag[dim] || []).forEach(t => {
+                    (Array.isArray(tag[dim]) ? tag[dim] : []).forEach(t => {
                         if (!quoteMap[quoteId].consensus[dim][t]) {
                             quoteMap[quoteId].consensus[dim][t] = 0;
                         }
@@ -326,7 +390,7 @@
         }
 
         function getConsensusStatus(count, totalTaggers) {
-            const percentage = (count / totalTaggers) * 100;
+            const percentage = totalTaggers > 0 ? (count / totalTaggers) * 100 : 0;
             if (count >= 2) return { status: 'accepted', color: 'green', percentage };
             if (count === 1) return { status: 'needs-review', color: 'orange', percentage };
             return { status: 'rejected', color: 'red', percentage };
@@ -339,34 +403,35 @@
             input.accept = '.csv';
             input.onchange = async (e) => {
                 const file = e.target.files[0];
+                if (!file) return;
                 const reader = new FileReader();
                 reader.onload = async (event) => {
-                    const text = event.target.result;
+                    const text = event.target.result || '';
                     const lines = text.split('\n');
                     const quotesToInsert = [];
-                    
+
                     for (let i = 1; i < lines.length; i++) {
                         const line = lines[i].trim();
                         if (!line) continue;
-                        
-                        const matches = line.match(/(?:^|,)("(?:[^"]|"")*"|[^,]*)/g);
-                        if (!matches || matches.length < 3) continue;
-                        
-                        const clean = matches.map(m => m.replace(/^,?"?|"?$/g, '').replace(/""/g, '"'));
-                        
+
+                        const matches = line.match(/(?:^|,)(\"(?:[^\"]|\"\")*\"|[^,]*)/g);
+                        if (!matches || matches.length < 1) continue;
+
+                        const clean = matches.map(m => m.replace(/^,?\"?|\"?$/g, '').replace(/\"\"/g, '\"'));
+
                         quotesToInsert.push({
                             quote: clean[0],
                             author: clean[1] || 'Unknown',
                             source: clean[2] || ''
                         });
                     }
-                    
+
                     const { error } = await supabase
                         .from('quotes')
                         .insert(quotesToInsert);
 
                     if (error) {
-                        alert('Error importing quotes: ' + error.message);
+                        alert('Error importing quotes: ' + (error.message || 'unknown'));
                     } else {
                         alert(`Successfully imported ${quotesToInsert.length} quotes!`);
                         await loadQuotes();
@@ -384,460 +449,277 @@
             }
 
             let csv = 'quote,author,source,emotions,lifeareas,needs,corequestions,taggers_count,conflicts\n';
-            
-            Object.values(state.consensusData).forEach(item => {
-                const quote = item.quote;
-                const taggerCount = item.taggers.length;
-                
-                // Get consensus tags (2+ votes)
+
+            Object.values(state.consensusData || {}).forEach(item => {
+                const quote = item.quote || {};
+                const taggerCount = Array.isArray(item.taggers) ? item.taggers.length : 0;
+
                 const getConsensusTags = (dim) => {
-                    return Object.entries(item.consensus[dim])
+                    return Object.entries(item.consensus[dim] || {})
                         .filter(([tag, count]) => count >= 2)
                         .map(([tag]) => tag)
                         .join(';');
                 };
 
-                const hasConflicts = Object.values(item.consensus).some(dim => 
-                    Object.values(dim).some(count => count === 1)
+                const hasConflicts = Object.values(item.consensus || {}).some(dim =>
+                    Object.values(dim || {}).some(count => count === 1)
                 );
 
-                csv += `"${quote.quote.replace(/"/g, '""')}","${quote.author}","${quote.source || ''}",`;
-                csv += `"${getConsensusTags('emotions')}","${getConsensusTags('lifeareas')}",`;
-                csv += `"${getConsensusTags('needs')}","${getConsensusTags('corequestions')}",`;
-                csv += `${taggerCount},${hasConflicts ? 'YES' : 'NO'}\n`;
+                const safe = (s) => (s || '').toString().replace(/"/g, '""');
+
+                csv += '"' + safe(quote.quote) + '","' + safe(quote.author) + '","' + safe(quote.source) + '",';
+                csv += '"' + safe(getConsensusTags('emotions')) + '","' + safe(getConsensusTags('lifeareas')) + '",';
+                csv += '"' + safe(getConsensusTags('needs')) + '","' + safe(getConsensusTags('corequestions')) + '",' + taggerCount + ',' + (hasConflicts ? '1' : '0') + '\n';
             });
-            
-            const blob = new Blob([csv], { type: 'text/csv' });
-            const url = window.URL.createObjectURL(blob);
+
+            const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+            const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = 'consensus_tags.csv';
+            a.download = 'consensus_export.csv';
+            document.body.appendChild(a);
             a.click();
+            a.remove();
+            URL.revokeObjectURL(url);
         }
 
-        // ============= UI FUNCTIONS =============
-        function toggleTag(dimension, tag) {
-            const current = state.currentTags[dimension];
-            if (current.includes(tag)) {
-                state.currentTags[dimension] = current.filter(t => t !== tag);
-            } else {
-                state.currentTags[dimension] = [...current, tag];
-            }
+        // ============= UI HELPERS =============
+        function clearElement(el) {
+            while (el.firstChild) el.removeChild(el.firstChild);
+        }
+
+        function createButton(label, classes, onClick) {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = classes || 'px-3 py-1 rounded bg-gray-200';
+            btn.textContent = label;
+            if (typeof onClick === 'function') btn.addEventListener('click', onClick);
+            return btn;
+        }
+
+        function toggleTag(dim, tag) {
+            if (!dim || !tag) return;
+            const arr = state.currentTags[dim] || [];
+            const idx = arr.indexOf(tag);
+            if (idx === -1) arr.push(tag); else arr.splice(idx, 1);
+            state.currentTags[dim] = arr;
             render();
-        }
-
-        async function loadQuote(index) {
-            state.currentIndex = index;
-            await loadQuoteTags(state.quotes[index].id);
-            render();
-        }
-
-        function setView(view) {
-            state.view = view;
-            if (view === 'consensus') {
-                loadConsensusData();
-            }
-            render();
-        }
-
-        // ============= RENDER FUNCTIONS =============
-        function render() {
-            // Prevent multiple simultaneous renders
-            if (state.isRendering) return;
-            state.isRendering = true;
-
-            const app = document.getElementById('app');
-            if (!app) {
-                state.isRendering = false;
-                return;
-            }
-
-            if (!state.currentUser) {
-                app.innerHTML = renderLogin();
-            } else if (state.view === 'tagging') {
-                app.innerHTML = renderTagging();
-            } else if (state.view === 'consensus') {
-                app.innerHTML = renderConsensus();
-            } else if (state.view === 'admin') {
-                app.innerHTML = renderAdmin();
-            }
-
-            state.isRendering = false;
         }
 
         function renderLogin() {
-            return `
-                <div class="min-h-screen flex items-center justify-center">
-                    <div class="bg-white rounded-lg shadow-2xl p-8 max-w-md w-full">
-                        <h1 class="text-3xl font-bold text-gray-800 mb-6 text-center">Quote Tagging System</h1>
-                        <p class="text-gray-600 mb-6 text-center">Collaborative 4D Emotional Matching</p>
-                        
-                        <div class="space-y-6">
-                            <div>
-                                <h2 class="text-xl font-semibold mb-4">Login</h2>
-                                <div class="space-y-3">
-                                    <input type="text" id="username" placeholder="Username" 
-                                        class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500">
-                                    <input type="password" id="password" placeholder="Password" 
-                                        class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500">
-                                    <button onclick="login()" 
-                                        class="w-full px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 font-semibold">
-                                        Login
-                                    </button>
-                                </div>
-                            </div>
-                            
-                            <div class="border-t pt-6">
-                                <h2 class="text-xl font-semibold mb-4">Register</h2>
-                                <div class="space-y-3">
-                                    <input type="text" id="regUsername" placeholder="Username" 
-                                        class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500">
-                                    <input type="password" id="regPassword" placeholder="Password (min 6 chars)" 
-                                        class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500">
-                                    <button onclick="register()" 
-                                        class="w-full px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 font-semibold">
-                                        Register
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
+            const app = document.getElementById('app');
+            clearElement(app);
 
-                        <div class="mt-6 p-4 bg-blue-50 rounded-lg text-sm">
-                            <p class="font-semibold text-blue-900 mb-2">Default Admin Account:</p>
-                            <p class="text-blue-800">Username: admin</p>
-                            <p class="text-blue-800">Password: admin123</p>
-                            <p class="text-xs text-blue-600 mt-2">⚠️ Change password after first login!</p>
-                        </div>
-                    </div>
-                </div>
-            `;
+            const card = document.createElement('div');
+            card.className = 'bg-white p-6 rounded shadow';
+
+            const title = document.createElement('h1');
+            title.className = 'text-2xl mb-4';
+            title.textContent = 'Quote Tagging - Login';
+            card.appendChild(title);
+
+            const uname = document.createElement('input');
+            uname.id = 'username';
+            uname.placeholder = 'email@example.com';
+            uname.className = 'border p-2 w-full mb-2';
+            card.appendChild(uname);
+
+            const pword = document.createElement('input');
+            pword.id = 'password';
+            pword.type = 'password';
+            pword.placeholder = 'password';
+            pword.className = 'border p-2 w-full mb-2';
+            card.appendChild(pword);
+
+            const btnRow = document.createElement('div');
+            btnRow.className = 'flex gap-2';
+            btnRow.appendChild(createButton('Login', 'bg-blue-600 text-white px-4 py-2 rounded', login));
+            btnRow.appendChild(createButton('Register', 'bg-gray-600 text-white px-4 py-2 rounded', () => { state.view = 'register'; render(); }));
+            card.appendChild(btnRow);
+
+            app.appendChild(card);
+        }
+
+        function renderRegister() {
+            const app = document.getElementById('app');
+            clearElement(app);
+
+            const card = document.createElement('div');
+            card.className = 'bg-white p-6 rounded shadow';
+
+            const title = document.createElement('h1');
+            title.className = 'text-2xl mb-4';
+            title.textContent = 'Register';
+            card.appendChild(title);
+
+            const uname = document.createElement('input');
+            uname.id = 'regUsername';
+            uname.placeholder = 'email@example.com';
+            uname.className = 'border p-2 w-full mb-2';
+            card.appendChild(uname);
+
+            const pword = document.createElement('input');
+            pword.id = 'regPassword';
+            pword.type = 'password';
+            pword.placeholder = 'password (min 6 chars)';
+            pword.className = 'border p-2 w-full mb-2';
+            card.appendChild(pword);
+
+            const btnRow = document.createElement('div');
+            btnRow.className = 'flex gap-2';
+            btnRow.appendChild(createButton('Create Account', 'bg-green-600 text-white px-4 py-2 rounded', register));
+            btnRow.appendChild(createButton('Back', 'bg-gray-600 text-white px-4 py-2 rounded', () => { state.view = 'login'; render(); }));
+            card.appendChild(btnRow);
+
+            app.appendChild(card);
         }
 
         function renderTagging() {
-            const currentQuote = state.quotes[state.currentIndex];
-            const taggedByUser = state.quotes.filter((q, idx) => {
-                // This is a simple count - in real app would check user_tags table
-                return idx <= state.currentIndex;
-            }).length;
+            const app = document.getElementById('app');
+            clearElement(app);
 
-            const progress = {
-                total: state.quotes.length,
-                tagged: taggedByUser,
-                percentage: state.quotes.length > 0 ? Math.round((taggedByUser / state.quotes.length) * 100) : 0
-            };
+            const header = document.createElement('div');
+            header.className = 'flex justify-between items-center mb-4';
 
-            return `
-                <div class="bg-white rounded-lg shadow-lg p-6 mb-6">
-                    <div class="flex justify-between items-center mb-4 flex-wrap gap-4">
-                        <div>
-                            <h1 class="text-3xl font-bold text-gray-800 mb-2">Quote Tagging System</h1>
-                            <p class="text-gray-600">Welcome, ${state.currentUser.username}! 
-                                ${state.currentUser.role === 'admin' ? '(Admin)' : '(Tagger)'}</p>
-                        </div>
-                        <div class="flex gap-3 flex-wrap">
-                            ${state.currentUser.role === 'admin' ? `
-                                <button onclick="setView('admin')" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
-                                    ⚙️ Admin
-                                </button>
-                                <button onclick="setView('consensus')" class="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700">
-                                    📊 Consensus
-                                </button>
-                            ` : ''}
-                            <button onclick="logout()" class="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700">
-                                Logout
-                            </button>
-                        </div>
-                    </div>
+            const title = document.createElement('h1');
+            title.className = 'text-2xl';
+            title.textContent = 'Tagging Interface';
+            header.appendChild(title);
 
-                    <div class="space-y-2">
-                        <div class="flex justify-between text-sm">
-                            <span class="text-gray-600">Your Progress: ${progress.tagged} / ${progress.total} quotes</span>
-                            <span class="font-semibold text-purple-600">${progress.percentage}%</span>
-                        </div>
-                        <div class="w-full bg-gray-200 rounded-full h-3">
-                            <div class="bg-gradient-to-r from-purple-500 to-blue-500 h-3 rounded-full transition-all" 
-                                style="width: ${progress.percentage}%"></div>
-                        </div>
-                    </div>
-                </div>
+            const controls = document.createElement('div');
+            controls.className = 'flex gap-2 items-center';
+            controls.appendChild(createButton('Save', 'bg-blue-600 text-white px-3 py-1 rounded', saveCurrentQuote));
+            controls.appendChild(createButton('Logout', 'bg-gray-600 text-white px-3 py-1 rounded', logout));
+            controls.appendChild(createButton('Consensus', 'bg-purple-600 text-white px-3 py-1 rounded', () => { state.view = 'consensus'; loadConsensusData(); }));
+            header.appendChild(controls);
 
-                ${state.quotes.length === 0 ? `
-                    <div class="bg-white rounded-lg shadow-lg p-12 text-center">
-                        <div class="text-6xl mb-4">🏷️</div>
-                        <h2 class="text-2xl font-semibold text-gray-800 mb-2">No Quotes Available</h2>
-                        <p class="text-gray-600 mb-6">Please contact admin to import quotes</p>
-                    </div>
-                ` : `
-                    ${renderQuoteNavigation(currentQuote)}
-                    ${currentQuote ? renderTaggingInterface(currentQuote) : ''}
-                `}
-            `;
-        }
+            app.appendChild(header);
 
-        function renderQuoteNavigation(currentQuote) {
-            return `
-                <div class="bg-white rounded-lg shadow-lg p-6 mb-6">
-                    <div class="flex items-center justify-between mb-4">
-                        <button onclick="loadQuote(${Math.max(0, state.currentIndex - 1)})" 
-                            ${state.currentIndex === 0 ? 'disabled' : ''} 
-                            class="px-4 py-2 bg-gray-200 rounded-lg hover:bg-gray-300 disabled:opacity-50">
-                            ← Previous
-                        </button>
-                        <div class="text-center">
-                            <span class="text-sm text-gray-600">Quote</span>
-                            <div class="text-2xl font-bold text-gray-800">
-                                ${state.currentIndex + 1} / ${state.quotes.length}
-                            </div>
-                        </div>
-                        <button onclick="loadQuote(${Math.min(state.quotes.length - 1, state.currentIndex + 1)})" 
-                            ${state.currentIndex === state.quotes.length - 1 ? 'disabled' : ''} 
-                            class="px-4 py-2 bg-gray-200 rounded-lg hover:bg-gray-300 disabled:opacity-50">
-                            Next →
-                        </button>
-                    </div>
+            const currentQuote = (state.quotes || [])[state.currentIndex] || { quote: 'No quotes available', author: '', source: '' };
 
-                    ${currentQuote ? `
-                        <div class="bg-gradient-to-r from-purple-100 to-blue-100 rounded-lg p-6">
-                            <p class="text-xl text-gray-800 mb-3 italic">"${currentQuote.quote}"</p>
-                            <p class="text-gray-700 font-semibold">— ${currentQuote.author}</p>
-                            ${currentQuote.source ? `<p class="text-gray-600 text-sm mt-1">${currentQuote.source}</p>` : ''}
-                        </div>
-                    ` : ''}
-                </div>
-            `;
-        }
+            const quoteCard = document.createElement('div');
+            quoteCard.className = 'bg-white p-6 rounded shadow mb-4';
 
-        function renderTaggingInterface(currentQuote) {
-            let html = '<div class="space-y-6">';
-            
-            Object.entries(tagSystem).forEach(([dimension, data]) => {
-                html += `
-                    <div class="bg-white rounded-lg shadow-lg p-6">
-                        <div class="bg-gradient-to-r from-purple-100 to-blue-100 rounded-lg p-4 mb-4">
-                            <p class="text-lg text-gray-800 italic">"${currentQuote.quote}"</p>
-                            <p class="text-gray-700 font-semibold mt-2">— ${currentQuote.author}</p>
-                        </div>
-                        
-                        <div class="mb-4">
-                            <h3 class="text-xl font-bold text-gray-800 mb-1 capitalize">
-                                ${dimension.replace('corequestions', 'Core Questions')}
-                            </h3>
-                            <p class="text-gray-600 mb-1">${data.question}</p>
-                            <p class="text-sm text-purple-600 font-semibold">Recommended: ${data.recommended}</p>
-                            <p class="text-sm text-gray-500 mt-1">
-                                Selected: ${state.currentTags[dimension].length}
-                            </p>
-                        </div>
-                        
-                        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                `;
-                
-                Object.entries(data.tags).forEach(([tag, description]) => {
-                    const isSelected = state.currentTags[dimension].includes(tag);
-                    html += `
-                        <button onclick="toggleTag('${dimension}', '${tag.replace(/'/g, "\\\'")}')" 
-                            class="p-4 rounded-lg border-2 text-left transition-all ${isSelected ? 'border-purple-500 bg-purple-50 shadow-md' : 'border-gray-200 hover:border-purple-300 hover:bg-gray-50'}">
-                            <div class="flex items-start justify-between mb-2">
-                                <span class="font-semibold text-gray-800">${tag}</span>
-                                ${isSelected ? '<span class="text-purple-600 text-xl">✓</span>' : ''}
-                            </div>
-                            <p class="text-sm text-gray-600">${description}</p>
-                        </button>
-                    `;
+            const qText = document.createElement('p');
+            qText.className = 'text-xl italic mb-2';
+            qText.textContent = currentQuote.quote || '';
+            quoteCard.appendChild(qText);
+
+            const qMeta = document.createElement('div');
+            qMeta.className = 'text-sm text-gray-600 mb-4';
+            qMeta.textContent = (currentQuote.author ? currentQuote.author + ' — ' : '') + (currentQuote.source || '');
+            quoteCard.appendChild(qMeta);
+
+            Object.keys(tagSystem).forEach(dim => {
+                const block = document.createElement('div');
+                block.className = 'mb-4';
+
+                const q = document.createElement('div');
+                q.className = 'font-semibold mb-2';
+                q.textContent = (tagSystem[dim]?.question) || dim;
+                block.appendChild(q);
+
+                const tagWrap = document.createElement('div');
+                tagWrap.className = 'flex flex-wrap gap-2';
+
+                Object.keys(tagSystem[dim]?.tags || {}).forEach(tag => {
+                    const selected = (state.currentTags[dim] || []).indexOf(tag) !== -1;
+                    const btn = createButton(tag, (selected ? 'bg-blue-600 text-white' : 'bg-gray-200') + ' px-3 py-1 rounded', () => toggleTag(dim, tag));
+                    btn.title = tagSystem[dim].tags[tag] || '';
+                    tagWrap.appendChild(btn);
                 });
-                
-                html += `
-                        </div>
-                    </div>
-                `;
+
+                block.appendChild(tagWrap);
+                quoteCard.appendChild(block);
             });
-            
-            html += `
-                <div class="bg-white rounded-lg shadow-lg p-6">
-                    <div class="flex items-center justify-between flex-wrap gap-4">
-                        <div>
-                            <h3 class="text-lg font-semibold text-gray-800 mb-1">Ready to Save?</h3>
-                            <p class="text-sm text-gray-600">Your tags will be saved for consensus calculation</p>
-                        </div>
-                        <button onclick="saveCurrentQuote()" 
-                            class="px-8 py-3 bg-gradient-to-r from-purple-600 to-blue-600 text-white rounded-lg hover:from-purple-700 hover:to-blue-700 font-semibold text-lg shadow-lg">
-                            Save & Next
-                        </button>
-                    </div>
-                </div>
-            </div>`;
-            
-            return html;
+
+            app.appendChild(quoteCard);
         }
 
         function renderConsensus() {
-            if (!state.consensusData) {
-                return `
-                    <div class="bg-white rounded-lg shadow-lg p-12 text-center">
-                        <div class="text-6xl mb-4">⏳</div>
-                        <p class="text-gray-600">Loading consensus data...</p>
-                    </div>
-                `;
+            const app = document.getElementById('app');
+            clearElement(app);
+
+            const header = document.createElement('div');
+            header.className = 'flex justify-between items-center mb-4';
+            const title = document.createElement('h1');
+            title.className = 'text-2xl';
+            title.textContent = 'Consensus View';
+            header.appendChild(title);
+
+            const controls = document.createElement('div');
+            controls.className = 'flex gap-2 items-center';
+            controls.appendChild(createButton('Back', 'bg-gray-600 text-white px-3 py-1 rounded', () => { state.view = 'tagging'; render(); }));
+            controls.appendChild(createButton('Export CSV', 'bg-green-600 text-white px-3 py-1 rounded', exportConsensusCSV));
+            header.appendChild(controls);
+            app.appendChild(header);
+
+            if (!state.consensusData || Object.keys(state.consensusData).length === 0) {
+                const empty = document.createElement('div');
+                empty.className = 'bg-white p-6 rounded shadow';
+                empty.textContent = 'No consensus data available.';
+                app.appendChild(empty);
+                return;
             }
 
-            const quotes = Object.entries(state.consensusData);
-            const totalQuotes = quotes.length;
-            const quotesWithConflicts = quotes.filter(([id, data]) => {
-                return Object.values(data.consensus).some(dim => 
-                    Object.values(dim).some(count => count === 1)
-                );
-            }).length;
+            Object.values(state.consensusData).forEach(item => {
+                const card = document.createElement('div');
+                card.className = 'bg-white p-4 rounded shadow mb-3';
 
-            return `
-                <div class="bg-white rounded-lg shadow-lg p-6 mb-6">
-                    <div class="flex justify-between items-center mb-4">
-                        <h1 class="text-3xl font-bold text-gray-800">Consensus Dashboard</h1>
-                        <div class="flex gap-3">
-                            <button onclick="exportConsensusCSV()" 
-                                class="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700">
-                                ⬇️ Export Consensus
-                            </button>
-                            <button onclick="setView('tagging')" 
-                                class="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700">
-                                Back to Tagging
-                            </button>
-                        </div>
-                    </div>
+                const q = document.createElement('div');
+                q.className = 'font-semibold mb-1';
+                q.textContent = item.quote?.quote || '';
+                card.appendChild(q);
 
-                    <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
-                        <div class="bg-blue-50 rounded-lg p-6 text-center">
-                            <div class="text-4xl font-bold text-blue-600 mb-2">${totalQuotes}</div>
-                            <div class="text-gray-600">Quotes Tagged</div>
-                        </div>
-                        <div class="bg-green-50 rounded-lg p-6 text-center">
-                            <div class="text-4xl font-bold text-green-600 mb-2">${totalQuotes - quotesWithConflicts}</div>
-                            <div class="text-gray-600">Full Consensus</div>
-                        </div>
-                        <div class="bg-orange-50 rounded-lg p-6 text-center">
-                            <div class="text-4xl font-bold text-orange-600 mb-2">${quotesWithConflicts}</div>
-                            <div class="text-gray-600">Need Review</div>
-                        </div>
-                    </div>
-                </div>
+                const meta = document.createElement('div');
+                meta.className = 'text-sm text-gray-600 mb-2';
+                meta.textContent = (item.quote?.author ? item.quote.author + ' — ' : '') + (item.quote?.source || '');
+                card.appendChild(meta);
 
-                <div class="space-y-4">
-                    ${quotes.map(([quoteId, data]) => renderConsensusQuote(quoteId, data)).join('')}
-                </div>
-            `;
+                const dims = document.createElement('div');
+                dims.className = 'grid grid-cols-2 gap-2';
+
+                ['emotions', 'lifeareas', 'needs', 'corequestions'].forEach(dim => {
+                    const dimBlock = document.createElement('div');
+                    const header = document.createElement('div');
+                    header.className = 'font-semibold';
+                    header.textContent = dim;
+                    dimBlock.appendChild(header);
+
+                    const list = document.createElement('div');
+                    Object.entries(item.consensus[dim] || {}).forEach(([tag, count]) => {
+                        const el = document.createElement('div');
+                        const status = getConsensusStatus(count, Array.isArray(item.taggers) ? item.taggers.length : 0);
+                        el.textContent = `${tag} — ${count} (${Math.round(status.percentage)}%)`;
+                        list.appendChild(el);
+                    });
+
+                    dimBlock.appendChild(list);
+                    dims.appendChild(dimBlock);
+                });
+
+                card.appendChild(dims);
+                app.appendChild(card);
+            });
         }
 
-        function renderConsensusQuote(quoteId, data) {
-            const taggerCount = data.taggers.length;
-            const hasConflicts = Object.values(data.consensus).some(dim => 
-                Object.values(dim).some(count => count === 1 && taggerCount >= 2)
-            );
-
-            return `
-                <div class="bg-white rounded-lg shadow-lg p-6">
-                    <div class="mb-4">
-                        <div class="flex justify-between items-start mb-3">
-                            <div class="flex-1">
-                                <p class="text-lg text-gray-800 italic mb-2">"${data.quote.quote}"</p>
-                                <p class="text-gray-700 font-semibold">— ${data.quote.author}</p>
-                            </div>
-                            <div class="ml-4">
-                                ${hasConflicts ? 
-                                    '<span class="bg-orange-100 text-orange-800 px-3 py-1 rounded-full text-sm">⚠️ Conflicts</span>' :
-                                    '<span class="bg-green-100 text-green-800 px-3 py-1 rounded-full text-sm">✓ Consensus</span>'
-                                }
-                            </div>
-                        </div>
-                        <p class="text-sm text-gray-600">Tagged by: ${data.taggers.map(t => t.username).join(', ')} (${taggerCount} users)</p>
-                    </div>
-
-                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        ${Object.entries(tagSystem).map(([dimension, dimData]) => `
-                            <div class="border border-gray-200 rounded-lg p-4">
-                                <h4 class="font-semibold text-gray-800 mb-2 capitalize">
-                                    ${dimension.replace('corequestions', 'Core Questions')}
-                                </h4>
-                                <div class="space-y-2">
-                                    ${Object.entries(data.consensus[dimension] || {})
-                                        .sort((a, b) => b[1] - a[1])
-                                        .map(([tag, count]) => {
-                                            const status = getConsensusStatus(count, taggerCount);
-                                            return `
-                                                <div class="flex justify-between items-center">
-                                                    <span class="text-sm text-gray-700">${tag}</span>
-                                                    <span class="text-xs px-2 py-1 rounded ${
-                                                        status.status === 'accepted' ? 'bg-green-100 text-green-800' :
-                                                        status.status === 'needs-review' ? 'bg-orange-100 text-orange-800' :
-                                                        'bg-red-100 text-red-800'
-                                                    }">
-                                                        ${count}/${taggerCount} (${Math.round(status.percentage)}%)
-                                                    </span>
-                                                </div>
-                                            `;
-                                        }).join('')
-                                    }
-                                </div>
-                            </div>
-                        `).join('')}
-                    </div>
-                </div>
-            `;
+        function render() {
+            if (state.isRendering) return;
+            state.isRendering = true;
+            try {
+                if (state.view === 'login') return renderLogin();
+                if (state.view === 'register') return renderRegister();
+                if (state.view === 'tagging') return renderTagging();
+                if (state.view === 'consensus') return renderConsensus();
+                // default
+                renderLogin();
+            } finally {
+                state.isRendering = false;
+            }
         }
 
-        function renderAdmin() {
-            return `
-                <div class="bg-white rounded-lg shadow-lg p-6">
-                    <div class="flex justify-between items-center mb-6">
-                        <h1 class="text-3xl font-bold text-gray-800">Admin Panel</h1>
-                        <button onclick="setView('tagging')" 
-                            class="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700">
-                            Back to Tagging
-                        </button>
-                    </div>
-
-                    <div class="space-y-6">
-                        <div class="bg-blue-50 rounded-lg p-6">
-                            <h3 class="text-lg font-semibold text-gray-800 mb-4">Import Quotes</h3>
-                            <p class="text-gray-600 mb-4">Upload a CSV file with columns: quote, author, source</p>
-                            <button onclick="importQuotesCSV()" 
-                                class="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-semibold">
-                                📁 Import CSV File
-                            </button>
-                        </div>
-
-                        <div class="bg-green-50 rounded-lg p-6">
-                            <h3 class="text-lg font-semibold text-gray-800 mb-4">Statistics</h3>
-                            <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
-                                <div class="bg-white rounded-lg p-4 text-center">
-                                    <div class="text-2xl font-bold text-gray-800">${state.quotes.length}</div>
-                                    <div class="text-sm text-gray-600">Total Quotes</div>
-                                </div>
-                                <div class="bg-white rounded-lg p-4 text-center">
-                                    <div class="text-2xl font-bold text-gray-800">${state.allUsers.length}</div>
-                                    <div class="text-sm text-gray-600">Total Users</div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div class="bg-purple-50 rounded-lg p-6">
-                            <h3 class="text-lg font-semibold text-gray-800 mb-4">Users</h3>
-                            <div class="space-y-2">
-                                ${state.allUsers.map(user => `
-                                    <div class="bg-white rounded-lg p-3 flex justify-between items-center">
-                                        <div>
-                                            <span class="font-semibold">${user.username}</span>
-                                            <span class="text-sm text-gray-600 ml-2">(${user.role})</span>
-                                        </div>
-                                    </div>
-                                `).join('')}
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            `;
-        }
-
-        // Initialize
-        window.addEventListener('DOMContentLoaded', function() {
+        // Initial render
+        document.addEventListener('DOMContentLoaded', () => {
             render();
         });
     </script>
