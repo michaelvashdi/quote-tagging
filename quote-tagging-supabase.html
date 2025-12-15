@@ -1,35 +1,23 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Quote Tagging System - Collaborative</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quote Tagging System - 4D Emotional Matching</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <style>
+        body {
+            background: linear-gradient(to bottom right, #faf5ff, #eff6ff);
+            min-height: 100vh;
+        }
+    </style>
 </head>
-<body class="bg-gradient-to-br from-purple-50 to-blue-50 min-h-screen">
-    <div id="app" class="p-6 max-w-6xl mx-auto"></div>
+<body class="p-6">
+    <div id="app" class="max-w-6xl mx-auto"></div>
 
     <script>
-        // ============= CONFIGURATION =============
-        // Replace the placeholder below with your actual project values.
-        // IMPORTANT: never commit service_role keys; only use anon/public keys in client code.
-        const SUPABASE_URL = 'https://kdkhucclzohjospjpbvd.supabase.co';
-        const SUPABASE_ANON_KEY = 'REPLACE_WITH_ANON_KEY';
-
-        // Initialize Supabase client safely (supabase-js v2 via CDN exposes window.supabase)
-        const _createClient = window.supabase?.createClient;
-        const supabase = typeof _createClient === 'function'
-            ? _createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
-            : null;
-
-        if (!supabase) {
-            console.warn('Supabase client not initialized. Check that @supabase/supabase-js loaded correctly.');
-        }
-
-        // ============= STATE =============
+        // State management
         let state = {
-            currentUser: null,
             quotes: [],
             currentIndex: 0,
             currentTags: {
@@ -38,14 +26,12 @@
                 needs: [],
                 corequestions: []
             },
-            view: 'login', // login, tagging, consensus, admin
-            allUsers: [],
-            consensusData: null,
-            selectedQuoteForConsensus: null,
-            isRendering: false
+            view: 'tagging',
+            newQuote: { quote: '', author: '', source: '' },
+            duplicateWarning: ''
         };
 
-        // ============= TAG SYSTEM =============
+        // Tag system configuration
         const tagSystem = {
             emotions: {
                 question: "What emotional states does this quote address?",
@@ -109,619 +95,517 @@
             }
         };
 
-        // ============= AUTH FUNCTIONS =============
-        async function login() {
-            if (!supabase) { alert('Supabase not initialized'); return; }
-
-            const usernameEl = document.getElementById('username');
-            const passwordEl = document.getElementById('password');
-            const username = usernameEl ? usernameEl.value.trim() : '';
-            const password = passwordEl ? passwordEl.value : '';
-
-            if (!username || !password) {
-                alert('Please enter username and password');
-                return;
-            }
-
-            try {
-                const { data, error } = await supabase.auth.signInWithPassword({
-                    email: username,
-                    password
-                });
-
-                if (error && !data) {
-                    console.warn('Auth sign in failed:', error.message);
-                }
-
-                const user = data?.user;
-                if (user) {
-                    const { data: appUser } = await supabase
-                        .from('users')
-                        .select('*')
-                        .eq('id', user.id)
-                        .maybeSingle();
-
-                    state.currentUser = appUser || { username, id: user.id, role: 'tagger' };
-                } else {
-                    // Fallback to legacy users table (plaintext) - not recommended
-                    const { data: row, error: rowErr } = await supabase
-                        .from('users')
-                        .select('*')
-                        .eq('username', username)
-                        .eq('password', password)
-                        .maybeSingle();
-
-                    if (rowErr || !row) {
-                        alert('Invalid credentials');
-                        return;
-                    }
-                    state.currentUser = row;
-                }
-
-                await loadQuotes();
-                await loadUserProgress();
-                state.view = 'tagging';
-                render();
-            } catch (err) {
-                console.error('Login error', err);
-                alert('Login failed. See console for details.');
+        // Load data from localStorage
+        function loadData() {
+            const saved = localStorage.getItem('quoteTags');
+            if (saved) {
+                state.quotes = JSON.parse(saved);
             }
         }
 
-        async function register() {
-            if (!supabase) { alert('Supabase not initialized'); return; }
-
-            const usernameEl = document.getElementById('regUsername');
-            const passwordEl = document.getElementById('regPassword');
-            const username = usernameEl ? usernameEl.value.trim() : '';
-            const password = passwordEl ? passwordEl.value : '';
-
-            if (!username || !password) {
-                alert('Please enter username and password');
-                return;
-            }
-
-            if (password.length < 6) {
-                alert('Password must be at least 6 characters');
-                return;
-            }
-
-            try {
-                const { data, error } = await supabase.auth.signUp({
-                    email: username,
-                    password
-                }, { data: { username } });
-
-                if (error) {
-                    console.error('Auth signUp error', error);
-                    alert('Registration failed: ' + error.message);
-                    return;
-                }
-
-                if (data?.user?.id) {
-                    const { error: insertErr } = await supabase
-                        .from('users')
-                        .insert([{ id: data.user.id, username, role: 'tagger' }]);
-
-                    if (insertErr) {
-                        console.warn('Could not create users row:', insertErr.message);
-                    }
-                }
-
-                alert('Registration successful! Please check email to confirm and then login.');
-                render();
-            } catch (err) {
-                console.error('Register error', err);
-                alert('Registration failed. See console for details.');
+        // Save data to localStorage
+        function saveData() {
+            if (state.quotes.length > 0) {
+                localStorage.setItem('quoteTags', JSON.stringify(state.quotes));
             }
         }
 
-        function logout() {
-            state.currentUser = null;
-            state.view = 'login';
-            state.quotes = [];
-            state.currentIndex = 0;
-            state.currentTags = { emotions: [], lifeareas: [], needs: [], corequestions: [] };
+        // Toggle tag selection
+        function toggleTag(dimension, tag) {
+            const current = state.currentTags[dimension];
+            if (current.includes(tag)) {
+                state.currentTags[dimension] = current.filter(t => t !== tag);
+            } else {
+                state.currentTags[dimension] = [...current, tag];
+            }
             render();
         }
 
-        // ============= DATA FUNCTIONS =============
-        async function loadQuotes() {
-            if (!supabase) return;
-            try {
-                const { data, error } = await supabase
-                    .from('quotes')
-                    .select('*')
-                    .order('created_at', { ascending: true });
-
-                if (error) {
-                    console.error('Error loading quotes:', error);
-                    return;
-                }
-
-                state.quotes = Array.isArray(data) ? data : [];
-            } catch (err) {
-                console.error('loadQuotes error', err);
-            }
-        }
-
-        async function loadUserProgress() {
-            if (!state.currentUser || !supabase) return;
-
-            const { data, error } = await supabase
-                .from('user_tags')
-                .select('*')
-                .eq('user_id', state.currentUser.id);
-
-            if (error) {
-                console.error('Error loading progress:', error);
-                return;
-            }
-
-            const taggedQuoteIds = new Set((data || []).filter(t => t.completed).map(t => t.quote_id));
-            const firstUntagged = (state.quotes || []).findIndex(q => !taggedQuoteIds.has(q.id));
-
-            if (firstUntagged !== -1) {
-                state.currentIndex = firstUntagged;
-                await loadQuoteTags(state.quotes[firstUntagged].id);
-            } else if ((state.quotes || []).length > 0) {
-                state.currentIndex = 0;
-                await loadQuoteTags(state.quotes[0].id);
-            }
-        }
-
-        async function loadQuoteTags(quoteId) {
-            if (!state.currentUser || !supabase || !quoteId) return;
-
-            const { data, error } = await supabase
-                .from('user_tags')
-                .select('*')
-                .eq('quote_id', quoteId)
-                .eq('user_id', state.currentUser.id)
-                .maybeSingle();
-
-            if (error) {
-                console.error('Error loading quote tags:', error);
-                return;
-            }
-
-            if (data) {
-                state.currentTags = {
-                    emotions: Array.isArray(data.emotions) ? data.emotions : [],
-                    lifeareas: Array.isArray(data.lifeareas) ? data.lifeareas : [],
-                    needs: Array.isArray(data.needs) ? data.needs : [],
-                    corequestions: Array.isArray(data.corequestions) ? data.corequestions : []
-                };
-            } else {
-                state.currentTags = { emotions: [], lifeareas: [], needs: [], corequestions: [] };
-            }
-        }
-
-        async function saveCurrentQuote() {
-            if (!supabase) return;
-            const currentQuote = (state.quotes || [])[state.currentIndex];
-            if (!currentQuote || !state.currentUser) return;
-
-            const { error } = await supabase
-                .from('user_tags')
-                .upsert({
-                    quote_id: currentQuote.id,
-                    user_id: state.currentUser.id,
-                    emotions: state.currentTags.emotions,
-                    lifeareas: state.currentTags.lifeareas,
-                    needs: state.currentTags.needs,
-                    corequestions: state.currentTags.corequestions,
-                    completed: true,
-                    tagged_at: new Date().toISOString()
-                }, { onConflict: 'quote_id,user_id' });
-
-            if (error) {
-                console.error('Error saving tags:', error);
-                alert('Error saving tags. Please try again.');
-                return;
-            }
-
-            state.currentTags = { emotions: [], lifeareas: [], needs: [], corequestions: [] };
-
-            if (state.currentIndex < (state.quotes || []).length - 1) {
+        // Save current quote
+        function saveCurrentQuote() {
+            const currentQuote = state.quotes[state.currentIndex];
+            if (!currentQuote) return;
+            
+            state.quotes[state.currentIndex] = {
+                ...currentQuote,
+                ...state.currentTags,
+                tagged: true
+            };
+            saveData();
+            
+            // Move to next untagged quote
+            const nextUntagged = state.quotes.findIndex((q, i) => i > state.currentIndex && !q.tagged);
+            if (nextUntagged !== -1) {
+                state.currentIndex = nextUntagged;
+            } else if (state.currentIndex < state.quotes.length - 1) {
                 state.currentIndex++;
-            } else {
-                state.currentIndex = 0;
+            }
+            
+            // Reset tags
+            state.currentTags = { emotions: [], lifeareas: [], needs: [], corequestions: [] };
+            
+            // Scroll to top
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+            render();
+        }
+
+        // Load quote
+        function loadQuote(index) {
+            state.currentIndex = index;
+            const quote = state.quotes[index];
+            if (quote) {
+                state.currentTags = {
+                    emotions: quote.emotions || [],
+                    lifeareas: quote.lifeareas || [],
+                    needs: quote.needs || [],
+                    corequestions: quote.corequestions || []
+                };
+            }
+            render();
+        }
+
+        // Add new quote
+        function addQuote() {
+            if (!state.newQuote.quote.trim()) {
+                state.duplicateWarning = 'Quote text is required';
+                render();
+                return;
             }
 
-            await loadQuoteTags((state.quotes || [])[state.currentIndex]?.id);
-            render();
-        }
+            const normalized = state.newQuote.quote.toLowerCase().trim();
+            const duplicate = state.quotes.find(q => q.quote.toLowerCase().trim() === normalized);
+            if (duplicate) {
+                state.duplicateWarning = `Duplicate found! This quote already exists by ${duplicate.author}`;
+                render();
+                return;
+            }
 
-        async function loadConsensusData() {
-            if (!supabase) return;
-            const { data: users } = await supabase.from('users').select('*');
-            state.allUsers = Array.isArray(users) ? users : [];
-
-            const { data: allTags } = await supabase
-                .from('user_tags')
-                .select('*, quotes(*), users(username)')
-                .eq('completed', true);
-
-            state.consensusData = calculateConsensus(Array.isArray(allTags) ? allTags : []);
-            render();
-        }
-
-        function calculateConsensus(allTags) {
-            const quoteMap = {};
-
-            (allTags || []).forEach(tag => {
-                const quoteId = tag.quote_id;
-                if (!quoteId) return;
-                if (!quoteMap[quoteId]) {
-                    quoteMap[quoteId] = {
-                        quote: tag.quotes || {},
-                        taggers: [],
-                        consensus: {
-                            emotions: {},
-                            lifeareas: {},
-                            needs: {},
-                            corequestions: {}
-                        }
-                    };
-                }
-
-                quoteMap[quoteId].taggers.push({
-                    username: tag.users?.username || 'unknown',
-                    tags: {
-                        emotions: Array.isArray(tag.emotions) ? tag.emotions : [],
-                        lifeareas: Array.isArray(tag.lifeareas) ? tag.lifeareas : [],
-                        needs: Array.isArray(tag.needs) ? tag.needs : [],
-                        corequestions: Array.isArray(tag.corequestions) ? tag.corequestions : []
-                    }
-                });
-
-                ['emotions', 'lifeareas', 'needs', 'corequestions'].forEach(dim => {
-                    (Array.isArray(tag[dim]) ? tag[dim] : []).forEach(t => {
-                        if (!quoteMap[quoteId].consensus[dim][t]) {
-                            quoteMap[quoteId].consensus[dim][t] = 0;
-                        }
-                        quoteMap[quoteId].consensus[dim][t]++;
-                    });
-                });
+            state.quotes.push({
+                quote: state.newQuote.quote.trim(),
+                author: state.newQuote.author.trim() || 'Unknown',
+                source: state.newQuote.source.trim() || '',
+                emotions: [],
+                lifeareas: [],
+                needs: [],
+                corequestions: [],
+                tagged: false
             });
 
-            return quoteMap;
+            saveData();
+            state.newQuote = { quote: '', author: '', source: '' };
+            state.duplicateWarning = '';
+            state.view = 'tagging';
+            state.currentIndex = state.quotes.length - 1;
+            render();
         }
 
-        function getConsensusStatus(count, totalTaggers) {
-            const percentage = totalTaggers > 0 ? (count / totalTaggers) * 100 : 0;
-            if (count >= 2) return { status: 'accepted', color: 'green', percentage };
-            if (count === 1) return { status: 'needs-review', color: 'orange', percentage };
-            return { status: 'rejected', color: 'red', percentage };
-        }
-
-        // ============= ADMIN FUNCTIONS =============
-        async function importQuotesCSV() {
+        // Import CSV
+        function importCSV() {
             const input = document.createElement('input');
             input.type = 'file';
             input.accept = '.csv';
-            input.onchange = async (e) => {
+            input.onchange = (e) => {
                 const file = e.target.files[0];
-                if (!file) return;
                 const reader = new FileReader();
-                reader.onload = async (event) => {
-                    const text = event.target.result || '';
+                reader.onload = (event) => {
+                    const text = event.target.result;
                     const lines = text.split('\n');
-                    const quotesToInsert = [];
-
+                    const imported = [];
+                    
                     for (let i = 1; i < lines.length; i++) {
                         const line = lines[i].trim();
                         if (!line) continue;
-
-                        const matches = line.match(/(?:^|,)(\"(?:[^\"]|\"\")*\"|[^,]*)/g);
-                        if (!matches || matches.length < 1) continue;
-
-                        const clean = matches.map(m => m.replace(/^,?\"?|\"?$/g, '').replace(/\"\"/g, '\"'));
-
-                        quotesToInsert.push({
+                        
+                        const matches = line.match(/(?:^|,)("(?:[^"]|"")*"|[^,]*)/g);
+                        if (!matches || matches.length < 3) continue;
+                        
+                        const clean = matches.map(m => m.replace(/^,?"?|"?$/g, '').replace(/""/g, '"'));
+                        
+                        imported.push({
                             quote: clean[0],
                             author: clean[1] || 'Unknown',
-                            source: clean[2] || ''
+                            source: clean[2] || '',
+                            emotions: clean[3] ? clean[3].split(';') : [],
+                            lifeareas: clean[4] ? clean[4].split(';') : [],
+                            needs: clean[5] ? clean[5].split(';') : [],
+                            corequestions: clean[6] ? clean[6].split(';') : [],
+                            tagged: clean[3] ? true : false
                         });
                     }
-
-                    const { error } = await supabase
-                        .from('quotes')
-                        .insert(quotesToInsert);
-
-                    if (error) {
-                        alert('Error importing quotes: ' + (error.message || 'unknown'));
-                    } else {
-                        alert(`Successfully imported ${quotesToInsert.length} quotes!`);
-                        await loadQuotes();
-                        render();
-                    }
+                    
+                    state.quotes = imported;
+                    state.currentIndex = 0;
+                    saveData();
+                    render();
                 };
                 reader.readAsText(file);
             };
             input.click();
         }
 
-        async function exportConsensusCSV() {
-            if (!state.consensusData) {
-                await loadConsensusData();
-            }
-
-            let csv = 'quote,author,source,emotions,lifeareas,needs,corequestions,taggers_count,conflicts\n';
-
-            Object.values(state.consensusData || {}).forEach(item => {
-                const quote = item.quote || {};
-                const taggerCount = Array.isArray(item.taggers) ? item.taggers.length : 0;
-
-                const getConsensusTags = (dim) => {
-                    return Object.entries(item.consensus[dim] || {})
-                        .filter(([tag, count]) => count >= 2)
-                        .map(([tag]) => tag)
-                        .join(';');
-                };
-
-                const hasConflicts = Object.values(item.consensus || {}).some(dim =>
-                    Object.values(dim || {}).some(count => count === 1)
-                );
-
-                const safe = (s) => (s || '').toString().replace(/"/g, '""');
-
-                csv += '"' + safe(quote.quote) + '","' + safe(quote.author) + '","' + safe(quote.source) + '",';
-                csv += '"' + safe(getConsensusTags('emotions')) + '","' + safe(getConsensusTags('lifeareas')) + '",';
-                csv += '"' + safe(getConsensusTags('needs')) + '","' + safe(getConsensusTags('corequestions')) + '",' + taggerCount + ',' + (hasConflicts ? '1' : '0') + '\n';
+        // Export CSV
+        function exportCSV() {
+            let csv = 'quote,author,source,emotions,lifeareas,needs,corequestions\n';
+            
+            state.quotes.forEach(q => {
+                const quote = `"${q.quote.replace(/"/g, '""')}"`;
+                const author = `"${q.author.replace(/"/g, '""')}"`;
+                const source = `"${q.source.replace(/"/g, '""')}"`;
+                const emotions = q.emotions.join(';');
+                const lifeareas = q.lifeareas.join(';');
+                const needs = q.needs.join(';');
+                const corequestions = q.corequestions.join(';');
+                
+                csv += `${quote},${author},${source},${emotions},${lifeareas},${needs},${corequestions}\n`;
             });
-
-            const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-            const url = URL.createObjectURL(blob);
+            
+            const blob = new Blob([csv], { type: 'text/csv' });
+            const url = window.URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = 'consensus_export.csv';
-            document.body.appendChild(a);
+            a.download = 'spiritual_quotes_tagged_4d_system.csv';
             a.click();
-            a.remove();
-            URL.revokeObjectURL(url);
         }
 
-        // ============= UI HELPERS =============
-        function clearElement(el) {
-            while (el.firstChild) el.removeChild(el.firstChild);
-        }
+        // Get statistics
+        function getStatistics() {
+            const stats = {
+                emotions: {},
+                lifeareas: {},
+                needs: {},
+                corequestions: {}
+            };
 
-        function createButton(label, classes, onClick) {
-            const btn = document.createElement('button');
-            btn.type = 'button';
-            btn.className = classes || 'px-3 py-1 rounded bg-gray-200';
-            btn.textContent = label;
-            if (typeof onClick === 'function') btn.addEventListener('click', onClick);
-            return btn;
-        }
-
-        function toggleTag(dim, tag) {
-            if (!dim || !tag) return;
-            const arr = state.currentTags[dim] || [];
-            const idx = arr.indexOf(tag);
-            if (idx === -1) arr.push(tag); else arr.splice(idx, 1);
-            state.currentTags[dim] = arr;
-            render();
-        }
-
-        function renderLogin() {
-            const app = document.getElementById('app');
-            clearElement(app);
-
-            const card = document.createElement('div');
-            card.className = 'bg-white p-6 rounded shadow';
-
-            const title = document.createElement('h1');
-            title.className = 'text-2xl mb-4';
-            title.textContent = 'Quote Tagging - Login';
-            card.appendChild(title);
-
-            const uname = document.createElement('input');
-            uname.id = 'username';
-            uname.placeholder = 'email@example.com';
-            uname.className = 'border p-2 w-full mb-2';
-            card.appendChild(uname);
-
-            const pword = document.createElement('input');
-            pword.id = 'password';
-            pword.type = 'password';
-            pword.placeholder = 'password';
-            pword.className = 'border p-2 w-full mb-2';
-            card.appendChild(pword);
-
-            const btnRow = document.createElement('div');
-            btnRow.className = 'flex gap-2';
-            btnRow.appendChild(createButton('Login', 'bg-blue-600 text-white px-4 py-2 rounded', login));
-            btnRow.appendChild(createButton('Register', 'bg-gray-600 text-white px-4 py-2 rounded', () => { state.view = 'register'; render(); }));
-            card.appendChild(btnRow);
-
-            app.appendChild(card);
-        }
-
-        function renderRegister() {
-            const app = document.getElementById('app');
-            clearElement(app);
-
-            const card = document.createElement('div');
-            card.className = 'bg-white p-6 rounded shadow';
-
-            const title = document.createElement('h1');
-            title.className = 'text-2xl mb-4';
-            title.textContent = 'Register';
-            card.appendChild(title);
-
-            const uname = document.createElement('input');
-            uname.id = 'regUsername';
-            uname.placeholder = 'email@example.com';
-            uname.className = 'border p-2 w-full mb-2';
-            card.appendChild(uname);
-
-            const pword = document.createElement('input');
-            pword.id = 'regPassword';
-            pword.type = 'password';
-            pword.placeholder = 'password (min 6 chars)';
-            pword.className = 'border p-2 w-full mb-2';
-            card.appendChild(pword);
-
-            const btnRow = document.createElement('div');
-            btnRow.className = 'flex gap-2';
-            btnRow.appendChild(createButton('Create Account', 'bg-green-600 text-white px-4 py-2 rounded', register));
-            btnRow.appendChild(createButton('Back', 'bg-gray-600 text-white px-4 py-2 rounded', () => { state.view = 'login'; render(); }));
-            card.appendChild(btnRow);
-
-            app.appendChild(card);
-        }
-
-        function renderTagging() {
-            const app = document.getElementById('app');
-            clearElement(app);
-
-            const header = document.createElement('div');
-            header.className = 'flex justify-between items-center mb-4';
-
-            const title = document.createElement('h1');
-            title.className = 'text-2xl';
-            title.textContent = 'Tagging Interface';
-            header.appendChild(title);
-
-            const controls = document.createElement('div');
-            controls.className = 'flex gap-2 items-center';
-            controls.appendChild(createButton('Save', 'bg-blue-600 text-white px-3 py-1 rounded', saveCurrentQuote));
-            controls.appendChild(createButton('Logout', 'bg-gray-600 text-white px-3 py-1 rounded', logout));
-            controls.appendChild(createButton('Consensus', 'bg-purple-600 text-white px-3 py-1 rounded', () => { state.view = 'consensus'; loadConsensusData(); }));
-            header.appendChild(controls);
-
-            app.appendChild(header);
-
-            const currentQuote = (state.quotes || [])[state.currentIndex] || { quote: 'No quotes available', author: '', source: '' };
-
-            const quoteCard = document.createElement('div');
-            quoteCard.className = 'bg-white p-6 rounded shadow mb-4';
-
-            const qText = document.createElement('p');
-            qText.className = 'text-xl italic mb-2';
-            qText.textContent = currentQuote.quote || '';
-            quoteCard.appendChild(qText);
-
-            const qMeta = document.createElement('div');
-            qMeta.className = 'text-sm text-gray-600 mb-4';
-            qMeta.textContent = (currentQuote.author ? currentQuote.author + ' — ' : '') + (currentQuote.source || '');
-            quoteCard.appendChild(qMeta);
-
-            Object.keys(tagSystem).forEach(dim => {
-                const block = document.createElement('div');
-                block.className = 'mb-4';
-
-                const q = document.createElement('div');
-                q.className = 'font-semibold mb-2';
-                q.textContent = (tagSystem[dim]?.question) || dim;
-                block.appendChild(q);
-
-                const tagWrap = document.createElement('div');
-                tagWrap.className = 'flex flex-wrap gap-2';
-
-                Object.keys(tagSystem[dim]?.tags || {}).forEach(tag => {
-                    const selected = (state.currentTags[dim] || []).indexOf(tag) !== -1;
-                    const btn = createButton(tag, (selected ? 'bg-blue-600 text-white' : 'bg-gray-200') + ' px-3 py-1 rounded', () => toggleTag(dim, tag));
-                    btn.title = tagSystem[dim].tags[tag] || '';
-                    tagWrap.appendChild(btn);
-                });
-
-                block.appendChild(tagWrap);
-                quoteCard.appendChild(block);
-            });
-
-            app.appendChild(quoteCard);
-        }
-
-        function renderConsensus() {
-            const app = document.getElementById('app');
-            clearElement(app);
-
-            const header = document.createElement('div');
-            header.className = 'flex justify-between items-center mb-4';
-            const title = document.createElement('h1');
-            title.className = 'text-2xl';
-            title.textContent = 'Consensus View';
-            header.appendChild(title);
-
-            const controls = document.createElement('div');
-            controls.className = 'flex gap-2 items-center';
-            controls.appendChild(createButton('Back', 'bg-gray-600 text-white px-3 py-1 rounded', () => { state.view = 'tagging'; render(); }));
-            controls.appendChild(createButton('Export CSV', 'bg-green-600 text-white px-3 py-1 rounded', exportConsensusCSV));
-            header.appendChild(controls);
-            app.appendChild(header);
-
-            if (!state.consensusData || Object.keys(state.consensusData).length === 0) {
-                const empty = document.createElement('div');
-                empty.className = 'bg-white p-6 rounded shadow';
-                empty.textContent = 'No consensus data available.';
-                app.appendChild(empty);
-                return;
-            }
-
-            Object.values(state.consensusData).forEach(item => {
-                const card = document.createElement('div');
-                card.className = 'bg-white p-4 rounded shadow mb-3';
-
-                const q = document.createElement('div');
-                q.className = 'font-semibold mb-1';
-                q.textContent = item.quote?.quote || '';
-                card.appendChild(q);
-
-                const meta = document.createElement('div');
-                meta.className = 'text-sm text-gray-600 mb-2';
-                meta.textContent = (item.quote?.author ? item.quote.author + ' — ' : '') + (item.quote?.source || '');
-                card.appendChild(meta);
-
-                const dims = document.createElement('div');
-                dims.className = 'grid grid-cols-2 gap-2';
-
+            state.quotes.forEach(q => {
+                if (!q.tagged) return;
                 ['emotions', 'lifeareas', 'needs', 'corequestions'].forEach(dim => {
-                    const dimBlock = document.createElement('div');
-                    const header = document.createElement('div');
-                    header.className = 'font-semibold';
-                    header.textContent = dim;
-                    dimBlock.appendChild(header);
-
-                    const list = document.createElement('div');
-                    Object.entries(item.consensus[dim] || {}).forEach(([tag, count]) => {
-                        const el = document.createElement('div');
-                        const status = getConsensusStatus(count, Array.isArray(item.taggers) ? item.taggers.length : 0);
-                        el.textContent = `${tag} — ${count} (${Math.round(status.percentage)}%)`;
-                        list.appendChild(el);
+                    (q[dim] || []).forEach(tag => {
+                        stats[dim][tag] = (stats[dim][tag] || 0) + 1;
                     });
-
-                    dimBlock.appendChild(list);
-                    dims.appendChild(dimBlock);
                 });
-
-                card.appendChild(dims);
-                app.appendChild(card);
             });
+
+            return stats;
         }
 
+        // Render function
         function render() {
-            if (state.isRendering) return;
-            state.isRendering = true;
-            try {
-                if (state.view === 'login') return renderLogin();
-                if (state.view === 'register') return renderRegister();
-                if (state.view === 'tagging') return renderTagging();
-                if (state.view === 'consensus') return renderConsensus();
-                // default
-                renderLogin();
-            } finally {
-                state.isRendering = false;
+            const app = document.getElementById('app');
+            const currentQuote = state.quotes[state.currentIndex];
+            const progress = {
+                total: state.quotes.length,
+                tagged: state.quotes.filter(q => q.tagged).length,
+                percentage: state.quotes.length > 0 ? Math.round((state.quotes.filter(q => q.tagged).length / state.quotes.length) * 100) : 0
+            };
+
+            if (state.view === 'tagging') {
+                app.innerHTML = `
+                    <div class="bg-white rounded-lg shadow-lg p-6 mb-6">
+                        <div class="flex justify-between items-center mb-4 flex-wrap gap-4">
+                            <div>
+                                <h1 class="text-3xl font-bold text-gray-800 mb-2">Quote Tagging System</h1>
+                                <p class="text-gray-600">4D Emotional Matching</p>
+                            </div>
+                            <div class="flex gap-3 flex-wrap">
+                                <button onclick="setView('management')" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
+                                    ➕ Manage Quotes
+                                </button>
+                                <button onclick="setView('statistics')" class="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700">
+                                    📊 Statistics
+                                </button>
+                                <button onclick="exportCSV()" ${state.quotes.length === 0 ? 'disabled' : ''} class="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50">
+                                    ⬇️ Export CSV
+                                </button>
+                            </div>
+                        </div>
+
+                        <div class="space-y-2">
+                            <div class="flex justify-between text-sm">
+                                <span class="text-gray-600">Progress: ${progress.tagged} / ${progress.total} quotes tagged</span>
+                                <span class="font-semibold text-purple-600">${progress.percentage}%</span>
+                            </div>
+                            <div class="w-full bg-gray-200 rounded-full h-3">
+                                <div class="bg-gradient-to-r from-purple-500 to-blue-500 h-3 rounded-full transition-all duration-300" style="width: ${progress.percentage}%"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    ${state.quotes.length === 0 ? `
+                        <div class="bg-white rounded-lg shadow-lg p-12 text-center">
+                            <div class="text-6xl mb-4">🏷️</div>
+                            <h2 class="text-2xl font-semibold text-gray-800 mb-2">No Quotes Yet</h2>
+                            <p class="text-gray-600 mb-6">Import a CSV file or add quotes manually to get started</p>
+                            <div class="flex gap-4 justify-center">
+                                <button onclick="importCSV()" class="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
+                                    Import CSV
+                                </button>
+                                <button onclick="setView('management')" class="px-6 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700">
+                                    Add Quotes Manually
+                                </button>
+                            </div>
+                        </div>
+                    ` : `
+                        <div class="bg-white rounded-lg shadow-lg p-6 mb-6">
+                            <div class="flex items-center justify-between mb-4">
+                                <button onclick="loadQuote(${Math.max(0, state.currentIndex - 1)})" ${state.currentIndex === 0 ? 'disabled' : ''} class="px-4 py-2 bg-gray-200 rounded-lg hover:bg-gray-300 disabled:opacity-50">
+                                    ← Previous
+                                </button>
+                                <div class="text-center">
+                                    <span class="text-sm text-gray-600">Quote</span>
+                                    <div class="text-2xl font-bold text-gray-800">
+                                        ${state.currentIndex + 1} / ${state.quotes.length}
+                                    </div>
+                                </div>
+                                <button onclick="loadQuote(${Math.min(state.quotes.length - 1, state.currentIndex + 1)})" ${state.currentIndex === state.quotes.length - 1 ? 'disabled' : ''} class="px-4 py-2 bg-gray-200 rounded-lg hover:bg-gray-300 disabled:opacity-50">
+                                    Next →
+                                </button>
+                            </div>
+
+                            ${currentQuote ? `
+                                <div class="bg-gradient-to-r from-purple-100 to-blue-100 rounded-lg p-6">
+                                    <p class="text-xl text-gray-800 mb-3 italic">"${currentQuote.quote}"</p>
+                                    <p class="text-gray-700 font-semibold">— ${currentQuote.author}</p>
+                                    ${currentQuote.source ? `<p class="text-gray-600 text-sm mt-1">${currentQuote.source}</p>` : ''}
+                                    ${currentQuote.tagged ? '<div class="mt-3 inline-flex items-center gap-2 bg-green-100 text-green-800 px-3 py-1 rounded-full text-sm">✓ Already Tagged</div>' : ''}
+                                </div>
+                            ` : ''}
+                        </div>
+
+                        ${currentQuote ? renderTaggingInterface(currentQuote) : ''}
+                    `}
+                `;
+            } else if (state.view === 'management') {
+                app.innerHTML = renderManagementView();
+            } else if (state.view === 'statistics') {
+                app.innerHTML = renderStatisticsView();
             }
         }
 
-        // Initial render
-        document.addEventListener('DOMContentLoaded', () => {
+        function renderTaggingInterface(currentQuote) {
+            let html = '<div class="space-y-6">';
+            
+            Object.entries(tagSystem).forEach(([dimension, data]) => {
+                html += `
+                    <div class="bg-white rounded-lg shadow-lg p-6">
+                        <div class="bg-gradient-to-r from-purple-100 to-blue-100 rounded-lg p-4 mb-4">
+                            <p class="text-lg text-gray-800 italic">"${currentQuote.quote}"</p>
+                            <p class="text-gray-700 font-semibold mt-2">— ${currentQuote.author}</p>
+                        </div>
+                        
+                        <div class="mb-4">
+                            <h3 class="text-xl font-bold text-gray-800 mb-1 capitalize">
+                                ${dimension.replace('corequestions', 'Core Questions')}
+                            </h3>
+                            <p class="text-gray-600 mb-1">${data.question}</p>
+                            <p class="text-sm text-purple-600 font-semibold">Recommended: ${data.recommended}</p>
+                            <p class="text-sm text-gray-500 mt-1">
+                                Selected: ${state.currentTags[dimension].length}
+                            </p>
+                        </div>
+                        
+                        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                `;
+                
+                Object.entries(data.tags).forEach(([tag, description]) => {
+                    const isSelected = state.currentTags[dimension].includes(tag);
+                    html += `
+                        <button onclick="toggleTag('${dimension}', '${tag.replace(/'/g, "\\\'")}')" class="p-4 rounded-lg border-2 text-left transition-all ${isSelected ? 'border-purple-500 bg-purple-50 shadow-md' : 'border-gray-200 hover:border-purple-300 hover:bg-gray-50'}">
+                            <div class="flex items-start justify-between mb-2">
+                                <span class="font-semibold text-gray-800">${tag}</span>
+                                ${isSelected ? '<span class="text-purple-600 text-xl">✓</span>' : ''}
+                            </div>
+                            <p class="text-sm text-gray-600">${description}</p>
+                        </button>
+                    `;
+                });
+                
+                html += `
+                        </div>
+                    </div>
+                `;
+            });
+            
+            html += `
+                <div class="bg-white rounded-lg shadow-lg p-6">
+                    <div class="flex items-center justify-between flex-wrap gap-4">
+                        <div>
+                            <h3 class="text-lg font-semibold text-gray-800 mb-1">Ready to Save?</h3>
+                            <p class="text-sm text-gray-600">Make sure you've selected tags for all dimensions</p>
+                        </div>
+                        <button onclick="saveCurrentQuote()" class="px-8 py-3 bg-gradient-to-r from-purple-600 to-blue-600 text-white rounded-lg hover:from-purple-700 hover:to-blue-700 font-semibold text-lg shadow-lg">
+                            Save & Next
+                        </button>
+                    </div>
+                </div>
+            </div>`;
+            
+            return html;
+        }
+
+        function renderManagementView() {
+            return `
+                <div class="bg-white rounded-lg shadow-lg p-6">
+                    <div class="flex justify-between items-center mb-6 flex-wrap gap-4">
+                        <h2 class="text-2xl font-bold text-gray-800">Quote Management</h2>
+                        <div class="flex gap-3">
+                            <button onclick="importCSV()" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
+                                Import CSV
+                            </button>
+                            <button onclick="setView('tagging')" class="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700">
+                                Back to Tagging
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="bg-blue-50 rounded-lg p-6 mb-6">
+                        <h3 class="text-lg font-semibold text-gray-800 mb-4">Add New Quote</h3>
+                        <div class="space-y-4">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">Quote Text *</label>
+                                <textarea id="newQuoteText" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent" rows="3" placeholder="Enter the quote text...">${state.newQuote.quote}</textarea>
+                            </div>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">Author</label>
+                                    <input type="text" id="newQuoteAuthor" value="${state.newQuote.author}" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent" placeholder="Author name">
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">Source</label>
+                                    <input type="text" id="newQuoteSource" value="${state.newQuote.source}" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent" placeholder="Source URL or book">
+                                </div>
+                            </div>
+                            ${state.duplicateWarning ? `
+                                <div class="flex items-center gap-2 text-red-600 bg-red-50 p-3 rounded-lg">
+                                    <span>⚠️</span>
+                                    <span>${state.duplicateWarning}</span>
+                                </div>
+                            ` : ''}
+                            <button onclick="addQuoteFromForm()" class="w-full px-6 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 font-semibold">
+                                Add Quote
+                            </button>
+                        </div>
+                    </div>
+
+                    <div>
+                        <h3 class="text-lg font-semibold text-gray-800 mb-4">All Quotes (${state.quotes.length})</h3>
+                        <div class="space-y-3 max-h-96 overflow-y-auto">
+                            ${state.quotes.map((q, idx) => `
+                                <div onclick="loadQuote(${idx}); setView('tagging')" class="p-4 border border-gray-200 rounded-lg hover:border-purple-300 cursor-pointer">
+                                    <div class="flex justify-between items-start">
+                                        <div class="flex-1">
+                                            <p class="text-gray-800 mb-1">"${q.quote}"</p>
+                                            <p class="text-sm text-gray-600">— ${q.author}</p>
+                                        </div>
+                                        <div class="ml-4">
+                                            ${q.tagged ? 
+                                                '<span class="bg-green-100 text-green-800 px-3 py-1 rounded-full text-xs">✓ Tagged</span>' : 
+                                                '<span class="bg-gray-100 text-gray-600 px-3 py-1 rounded-full text-xs">Untagged</span>'
+                                            }
+                                        </div>
+                                    </div>
+                                </div>
+                            `).join('')}
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderStatisticsView() {
+            const stats = getStatistics();
+            const taggedCount = state.quotes.filter(q => q.tagged).length;
+            const progress = {
+                total: state.quotes.length,
+                tagged: taggedCount,
+                percentage: state.quotes.length > 0 ? Math.round((taggedCount / state.quotes.length) * 100) : 0
+            };
+
+            let html = `
+                <div class="bg-white rounded-lg shadow-lg p-6">
+                    <div class="flex justify-between items-center mb-6">
+                        <h2 class="text-2xl font-bold text-gray-800">Tag Statistics</h2>
+                        <button onclick="setView('tagging')" class="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700">
+                            Back to Tagging
+                        </button>
+                    </div>
+
+                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-6">
+                        <div class="bg-blue-50 rounded-lg p-6 text-center">
+                            <div class="text-4xl font-bold text-blue-600 mb-2">${state.quotes.length}</div>
+                            <div class="text-gray-600">Total Quotes</div>
+                        </div>
+                        <div class="bg-green-50 rounded-lg p-6 text-center">
+                            <div class="text-4xl font-bold text-green-600 mb-2">${taggedCount}</div>
+                            <div class="text-gray-600">Tagged Quotes</div>
+                        </div>
+                        <div class="bg-orange-50 rounded-lg p-6 text-center">
+                            <div class="text-4xl font-bold text-orange-600 mb-2">${state.quotes.length - taggedCount}</div>
+                            <div class="text-gray-600">Untagged Quotes</div>
+                        </div>
+                        <div class="bg-purple-50 rounded-lg p-6 text-center">
+                            <div class="text-4xl font-bold text-purple-600 mb-2">${progress.percentage}%</div>
+                            <div class="text-gray-600">Complete</div>
+                        </div>
+                    </div>
+            `;
+
+            if (taggedCount > 0) {
+                Object.entries(tagSystem).forEach(([dimension, data]) => {
+                    html += `
+                        <div class="bg-gray-50 rounded-lg p-6 mb-6">
+                            <h3 class="text-xl font-bold text-gray-800 mb-4 capitalize">
+                                ${dimension.replace('corequestions', 'Core Questions')}
+                            </h3>
+                            <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+                    `;
+                    
+                    Object.keys(data.tags).forEach(tag => {
+                        const count = stats[dimension][tag] || 0;
+                        const percentage = taggedCount > 0 ? Math.round((count / taggedCount) * 100) : 0;
+                        html += `
+                            <div class="bg-white rounded-lg p-4 border border-gray-200">
+                                <div class="text-2xl font-bold text-purple-600 mb-1">${count}</div>
+                                <div class="text-sm text-gray-800 font-semibold mb-1">${tag}</div>
+                                <div class="text-xs text-gray-500">${percentage}% of tagged</div>
+                            </div>
+                        `;
+                    });
+                    
+                    html += `
+                            </div>
+                        </div>
+                    `;
+                });
+            } else {
+                html += `
+                    <div class="text-center py-12">
+                        <div class="text-6xl mb-4">📊</div>
+                        <p class="text-gray-600">No tagged quotes yet. Start tagging to see statistics!</p>
+                    </div>
+                `;
+            }
+
+            html += '</div>';
+            return html;
+        }
+
+        function setView(view) {
+            state.view = view;
             render();
-        });
+        }
+
+        function addQuoteFromForm() {
+            state.newQuote = {
+                quote: document.getElementById('newQuoteText').value,
+                author: document.getElementById('newQuoteAuthor').value,
+                source: document.getElementById('newQuoteSource').value
+            };
+            addQuote();
+        }
+
+        // Initialize
+        loadData();
+        render();
     </script>
 </body>
 </html>
